@@ -42,7 +42,7 @@ export function safeExplorerUrl(
 
   try {
     const url = new URL(raw);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (url.protocol !== "https:") return null;
     const hosts = allowedHosts ?? DEFAULT_ALLOWED_HOSTS;
     if (!hosts.has(url.hostname)) return null;
     if (!url.pathname.includes("/tx/")) return null;

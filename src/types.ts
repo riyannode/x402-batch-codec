@@ -46,7 +46,8 @@ export type DecodedBatchCalldata = {
 /** Result of decoding the outer submitBatch input (no RPC needed). */
 export type DecodedSubmitBatchInput = {
   calldataBytes: `0x${string}`;
-  signature: `0x${string}`;
+  hasSignature: boolean;
+  signatureBytesLength: number;
 };
 
 /** Gateway transfer status from Circle's public API. Safe fields only. */
@@ -106,7 +107,6 @@ export type ResolveOptions = {
   gatewayWalletAddress?: string;
   expectedBuyer?: `0x${string}`;
   expectedSeller?: `0x${string}`;
-  expectedAmount?: string;
   rpcUrl?: string;
   maxPages?: number;
 };

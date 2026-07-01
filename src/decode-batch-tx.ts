@@ -25,7 +25,7 @@ import type {
 
 /**
  * Decode the outer submitBatch(bytes calldataBytes, bytes signature) input data.
- * Returns the raw calldataBytes and signature hex strings.
+ * Returns calldataBytes + signature metadata only (no raw signature bytes).
  * Returns null if the input is not a valid submitBatch call.
  */
 export function decodeSubmitBatchInput(
@@ -41,7 +41,11 @@ export function decodeSubmitBatchInput(
       `0x${string}`,
       `0x${string}`,
     ];
-    return { calldataBytes, signature };
+    return {
+      calldataBytes,
+      hasSignature: signature !== "0x",
+      signatureBytesLength: Math.max(0, (signature.length - 2) / 2),
+    };
   } catch {
     return null;
   }

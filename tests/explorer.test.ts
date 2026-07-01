@@ -44,6 +44,11 @@ describe("safeExplorerUrl", () => {
   it("rejects non-http scheme", () => {
     expect(safeExplorerUrl("javascript:alert(1)")).toBeNull();
   });
+  it("rejects http (https-only)", () => {
+    expect(
+      safeExplorerUrl("http://testnet.arcscan.app/tx/0x" + "a".repeat(64)),
+    ).toBeNull();
+  });
   it("rejects non-string", () => {
     expect(safeExplorerUrl(null)).toBeNull();
     expect(safeExplorerUrl(42)).toBeNull();

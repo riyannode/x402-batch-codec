@@ -22,7 +22,27 @@ describe("decodeSubmitBatchInput", () => {
     const result = decodeSubmitBatchInput(input);
     expect(result).not.toBeNull();
     expect(result!.calldataBytes).toBe(calldataBytes);
-    expect(result!.signature).toBe(signature);
+    expect(result!.hasSignature).toBe(true);
+    expect(result!.signatureBytesLength).toBe(65);
+  });
+
+  it("hasSignature false for empty signature", () => {
+    const calldataBytes = ("0x" + "aa".repeat(100)) as `0x${string}`;
+    const signature = "0x" as `0x${string}`;
+    const input = buildSubmitBatchInput(calldataBytes, signature);
+    const result = decodeSubmitBatchInput(input);
+    expect(result).not.toBeNull();
+    expect(result!.hasSignature).toBe(false);
+    expect(result!.signatureBytesLength).toBe(0);
+  });
+
+  it("does not return raw signature", () => {
+    const calldataBytes = ("0x" + "aa".repeat(100)) as `0x${string}`;
+    const signature = ("0x" + "bb".repeat(65)) as `0x${string}`;
+    const input = buildSubmitBatchInput(calldataBytes, signature);
+    const result = decodeSubmitBatchInput(input);
+    expect(result).not.toBeNull();
+    expect(result).not.toHaveProperty("signature");
   });
 
   it("returns null for non-submitBatch input", () => {

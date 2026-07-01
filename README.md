@@ -19,6 +19,8 @@ Standalone TypeScript SDK for decoding and verifying Circle Gateway x402 `submit
 - **Does not expose raw payment signatures**, `x-payment` headers, EIP-712 payloads, or Gateway responses.
 - **Does not include** Next.js, Supabase, React, or any framework-specific code.
 
+> PR1 verifies buyer/seller presence via decoded batch deltas. Amount verification is intentionally not included yet.
+
 ## Install
 
 ```bash
@@ -76,7 +78,7 @@ const decoded = decodeBatchProof(encoded);
 
 | Function | Description |
 |----------|-------------|
-| `decodeSubmitBatchInput(txInput)` | Decode outer `submitBatch(bytes,bytes)` input → calldataBytes + signature |
+| `decodeSubmitBatchInput(txInput)` | Decode outer `submitBatch(bytes,bytes)` input → calldataBytes + signature metadata |
 | `decodeSubmitBatchCalldataBytes(calldataBytes)` | Decode inner calldata layout → batchId, domain, token, entries |
 | `decodeBatchTx(txHash, client)` | Fetch tx + decode + enrich with block metadata |
 | `decodeBatchTxWithRpc(txHash, rpcUrl)` | Convenience wrapper that creates a PublicClient |
