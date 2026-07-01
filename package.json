@@ -1,0 +1,53 @@
+{
+  "name": "x402-batch-codec",
+  "version": "0.1.0",
+  "description": "Standalone codec for Circle Gateway x402 submitBatch transactions — decode, verify, and prove batch inclusions.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": [
+    "x402",
+    "circle",
+    "gateway",
+    "arc",
+    "batch",
+    "codec",
+    "stablecoin"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "viem": "^2.21.54"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/riyannode/x402-batch-codec.git"
+  }
+}
