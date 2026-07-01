@@ -23,8 +23,16 @@ Standalone TypeScript SDK for decoding and verifying Circle Gateway x402 `submit
 
 ## Install
 
+This package is not published to npm yet. Install directly from GitHub:
+
 ```bash
-npm install x402-batch-codec
+npm install github:riyannode/x402-batch-codec
+```
+
+For reproducible installs, pin a commit:
+
+```bash
+npm install github:riyannode/x402-batch-codec#eef37cbe93d174124b5691c0402d12327d317579
 ```
 
 ## Quick Start
