@@ -1,11 +1,10 @@
 /**
  * x402-batch-codec
  *
- * Standalone codec for Circle Gateway x402 submitBatch transactions.
- * Decode, verify, and prove batch inclusions without executing payments.
+ * Standalone codec for decoded Circle Gateway submitBatch evidence on Arc.
+ * It does not execute payments or produce cryptographic attestations.
  */
 
-// Types
 export type {
   BatchEntry,
   NetTransfer,
@@ -13,44 +12,38 @@ export type {
   DecodedBatchCalldata,
   DecodedSubmitBatchInput,
   GatewayTransferStatus,
+  VerificationLevel,
   ProofStatus,
   MatchedBy,
   X402BatchProof,
+  DecodeBatchTxOptions,
   ResolveOptions,
 } from "./types.js";
 
-// ABI
 export { SUBMIT_BATCH_ABI } from "./abi.js";
-
-// Guards
-export { isEvmTxHash, isUuid, isSettlementId } from "./guards.js";
-
-// Format
+export {
+  isEvmTxHash,
+  isEvmAddress,
+  isBytes32,
+  isUuid,
+  isSettlementId,
+} from "./guards.js";
 export { formatSignedUsdc } from "./format.js";
-
-// Net transfers
 export { inferNetTransfers, buyerInBatch, sellerInBatch } from "./net-transfers.js";
-
-// Decode
 export { decodeSubmitBatchCalldataBytes } from "./decode-submit-batch.js";
+export type { DecodeSubmitBatchOptions } from "./decode-submit-batch.js";
 export {
   decodeSubmitBatchInput,
   decodeBatchTx,
   decodeBatchTxWithRpc,
 } from "./decode-batch-tx.js";
-
-// Explorer
 export {
   buildArcExplorerTxUrl,
   safeExplorerUrl,
+  findSubmitBatchCandidates,
   findNearestSubmitBatch,
 } from "./explorer.js";
-
-// Proof codec
+export type { SubmitBatchCandidate } from "./explorer.js";
 export { encodeBatchProof, decodeBatchProof } from "./proof-codec.js";
-
-// Redaction
 export { redactUnsafePaymentText } from "./redaction.js";
-
-// Resolver (optional adapter)
 export { resolveX402BatchProof } from "./resolver.js";

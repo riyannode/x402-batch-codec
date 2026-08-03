@@ -1,131 +1,147 @@
 # x402-batch-codec
 
-Standalone TypeScript SDK for decoding and verifying Circle Gateway x402 `submitBatch` transactions on Arc.
+Standalone TypeScript SDK for **decoded on-chain batch evidence and buyer/seller address participation evidence for Circle Gateway `submitBatch` transactions on Arc**.
+
+The package name and repository name remain `x402-batch-codec`.
 
 ## What this does
 
-- Decode `submitBatch(bytes calldataBytes, bytes signature)` calldata
-- Extract batch entries (address + signed int256 delta) from inner calldata layout
-- Infer net transfers by pairing exact-opposite deltas
-- Verify buyer/seller presence in a batch via decoded delta evidence
-- Encode/decode safe proof objects as base64url JSON
-- Resolve settlement UUID → on-chain batch tx via Arc explorer (optional adapter)
+- Decode Circle Gateway `submitBatch(bytes,bytes)` calldata.
+- Extract batch entries and signed int256 balance deltas.
+- Infer exact-opposite net transfers as a convenience utility.
+- Decode and validate mined Arc transactions through a caller-controlled RPC.
+- Resolve timestamp candidates and, when strict RPC context checks pass, return decoded batch evidence.
+- Report buyer/seller signed-delta address participation in a netted batch.
+- Encode portable batch evidence metadata as unsigned Base64URL JSON.
 
-## What this does NOT do
+## What this does not claim
 
-- **Does not execute payments.** No wallet signing, no x402 challenge handling.
-- **Does not sign anything.** No EIP-712, no private keys, no DCW integration.
-- **Does not require Circle API keys** for core codec functions.
-- **Does not expose raw payment signatures**, `x-payment` headers, EIP-712 payloads, or Gateway responses.
-- **Does not include** Next.js, Supabase, React, or any framework-specific code.
+- Circle Gateway transfer status is canonical for the transfer UUID; it is kept separate from resolver verification status.
+- Timestamp matching is candidate discovery only and is never presented as verified settlement inclusion.
+- Buyer/seller delta presence proves address participation in a netted batch. It does not prove a unique buyer-to-seller x402 transfer.
+- Exact payment amount attribution is not implemented.
+- Gateway batches may contain netted balance deltas.
+- Base64URL evidence objects are unsigned portable metadata, not cryptographic proofs or attestations.
+- This SDK does not provide Solidity or smart-contract verification.
+- This SDK does not assume an official Circle transfer UUID-to-batch transaction mapping exists.
+- This SDK does not execute payments, sign x402 payloads, or expose raw signatures, payment headers, EIP-712 payloads, secrets, API credentials, or wallet identifiers.
 
-> PR1 verifies buyer/seller presence via decoded batch deltas. Amount verification is intentionally not included yet.
+## Verification levels
+
+`resolveX402BatchProof` returns an explicit `verificationLevel`:
+
+- `unresolved`: no usable batch transaction was found.
+- `timestamp_candidate`: a possible `submitBatch` transaction was found by timing, but RPC decoding/validation did not succeed.
+- `decoded_batch`: the transaction was fetched, mined, receipt-successful, context-validated, and decoded.
+- `address_participation`: decoded evidence additionally found the supplied expected buyer and/or seller with the correct signed delta direction. When both are supplied, both must match for this strongest level.
+
+`gatewayStatus` preserves Circle's actual transfer status. It is not overwritten with `completed`. The legacy `status` field remains for compatibility but new consumers should use `gatewayStatus` and `verificationLevel`.
 
 ## Install
 
-This package is not published to npm yet. Install directly from GitHub:
+This package is not published to npm yet. Install directly from GitHub and pin the full commit SHA supplied by your release process:
 
 ```bash
-npm install github:riyannode/x402-batch-codec
+npm install github:riyannode/x402-batch-codec#<FULL_COMMIT_SHA>
 ```
 
-For reproducible installs, pin a commit:
-
-```bash
-npm install github:riyannode/x402-batch-codec#eef37cbe93d174124b5691c0402d12327d317579
-```
-
-## Quick Start
+## Quick start
 
 ```typescript
 import {
   decodeSubmitBatchCalldataBytes,
   decodeBatchTxWithRpc,
-  inferNetTransfers,
   buyerInBatch,
-  sellerInBatch,
   encodeBatchProof,
   decodeBatchProof,
   resolveX402BatchProof,
 } from "x402-batch-codec";
 
-// Decode inner calldata (no RPC needed)
 const inner = decodeSubmitBatchCalldataBytes(calldataBytes);
 if (inner) {
   console.log(`Batch ${inner.batchId}, domain ${inner.domain}`);
-  console.log(`${inner.entries.length} entries`);
-
-  const transfers = inferNetTransfers(inner.entries);
-  console.log(`${transfers.length} net transfers`);
 }
 
-// Decode a full on-chain tx (needs RPC)
-const decoded = await decodeBatchTxWithRpc(txHash, "https://rpc.testnet.arc.network");
+const decoded = await decodeBatchTxWithRpc(
+  txHash,
+  "https://rpc.testnet.arc.network",
+  {
+    requireReceipt: true,
+    expectedGatewayWallet: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
+    expectedDomain: 26,
+  },
+);
 if (decoded) {
-  const buyer = buyerInBatch(decoded, "0xBuyerAddress...");
-  console.log(`Buyer verified: ${buyer.found}`);
+  console.log(buyerInBatch(decoded, buyerAddress).found);
 }
 
-// Encode a safe proof (base64url JSON)
-const proof = {
+const evidence = await resolveX402BatchProof({
+  settlementId,
+  expectedBuyer: buyerAddress,
+  expectedSeller: sellerAddress,
+  // Defaults: Arc Testnet RPC, Arc Gateway wallet, and domain 26.
+});
+
+const encoded = encodeBatchProof({
   v: 1,
-  txHash: "0xabc...",
-  explorerUrl: "https://testnet.arcscan.app/tx/0xabc...",
-  entriesCount: 39,
-  netTransfersCount: 39,
-  buyerVerified: true,
-  matchedBy: "decoded_delta" as const,
-};
-const encoded = encodeBatchProof(proof);
-const decoded = decodeBatchProof(encoded);
+  verificationLevel: "decoded_batch",
+  txHash: evidence.txHash,
+  explorerUrl: evidence.explorerUrl,
+  entriesCount: evidence.entriesCount,
+  netTransfersCount: evidence.netTransfersCount,
+  limitations: evidence.limitations,
+});
+const portableMetadata = decodeBatchProof(encoded);
 ```
 
-## API Reference
+## API reference
 
-### Core Codec (no Circle API needed)
-
-| Function | Description |
-|----------|-------------|
-| `decodeSubmitBatchInput(txInput)` | Decode outer `submitBatch(bytes,bytes)` input → calldataBytes + signature metadata |
-| `decodeSubmitBatchCalldataBytes(calldataBytes)` | Decode inner calldata layout → batchId, domain, token, entries |
-| `decodeBatchTx(txHash, client)` | Fetch tx + decode + enrich with block metadata |
-| `decodeBatchTxWithRpc(txHash, rpcUrl)` | Convenience wrapper that creates a PublicClient |
-| `inferNetTransfers(entries)` | Pair exact-opposite deltas → net transfers |
-| `buyerInBatch(decoded, address)` | Find address with negative delta (buyer) |
-| `sellerInBatch(decoded, address)` | Find address with positive delta (seller) |
-| `formatSignedUsdc(delta)` | Format bigint → human-readable USDC string |
-| `isEvmTxHash(value)` | Guard: valid `0x` + 64 hex chars |
-| `isUuid(value)` / `isSettlementId(value)` | Guard: valid UUID |
-| `buildArcExplorerTxUrl(hash, base?)` | Build explorer URL from tx hash |
-| `safeExplorerUrl(url, allowedHosts?)` | Validate explorer URL against allowlist |
-| `encodeBatchProof(proof)` | Encode proof → base64url JSON |
-| `decodeBatchProof(encoded)` | Decode base64url → proof object |
-| `redactUnsafePaymentText(text)` | Strip sensitive payment data from text |
-
-### Optional Resolver Adapter (calls Circle Gateway + Arc explorer)
+### Core codec
 
 | Function | Description |
-|----------|-------------|
-| `resolveX402BatchProof(opts)` | Settlement UUID → verified batch proof |
-| `findNearestSubmitBatch(base, wallet, updatedAtMs, maxPages?)` | Scan Arc explorer for submitBatch candidate |
+|---|---|
+| `decodeSubmitBatchInput(txInput)` | Decode outer `submitBatch(bytes,bytes)` input without returning signature bytes. |
+| `decodeSubmitBatchCalldataBytes(calldataBytes, options?)` | Validate and decode inner layout, batch ID, domain, token, Gateway wallet, and entries. |
+| `decodeBatchTx(txHash, client, options?)` | Fetch and decode a transaction; strict options validate receipt and context. |
+| `decodeBatchTxWithRpc(txHash, rpcUrl, options?)` | Convenience wrapper for an RPC URL. |
+| `inferNetTransfers(entries)` | Pair exact-opposite deltas as a convenience, not unique payment attribution. |
+| `buyerInBatch(decoded, address)` | Find a negative signed delta for an address. |
+| `sellerInBatch(decoded, address)` | Find a positive signed delta for an address. |
+| `formatSignedUsdc(delta)` | Format signed USDC atomic units using bigint arithmetic. |
 
-## Security Model
+### Candidate discovery and resolver
 
-### Proof = decoded delta evidence, not timestamp
+| Function | Description |
+|---|---|
+| `findSubmitBatchCandidates(base, wallet, updatedAtMs, maxPages?, maxDistanceMs?)` | Paginate validated explorer responses and return structured timestamp candidates sorted by distance. |
+| `findNearestSubmitBatch(...)` | Backward-compatible helper returning only the nearest candidate hash. |
+| `resolveX402BatchProof(opts)` | Fetch safe Gateway status, inspect Gateway-provided hashes, discover candidates, strictly decode through RPC, and return portable batch evidence metadata. |
 
-Timestamp matching (used by the resolver adapter) is **candidate discovery only**. It narrows the search space. The actual proof signal is **decoded buyer/seller delta evidence**: does the expected buyer address appear with a negative delta in the batch entries? Does the expected seller appear with a positive delta?
+Resolver defaults:
 
-### Recursive unsafe field rejection
+- RPC: `https://rpc.testnet.arc.network`
+- Expected Gateway wallet: `0x0077777d7EBA4688BDeF3E311b846F25870A19B9`
+- Expected Arc domain: `26`
+- Explorer candidate window: one hour unless `maxDistanceMs` is configured.
 
-`encodeBatchProof` and `decodeBatchProof` recursively scan the entire object tree for unsafe field names:
+Strict transaction validation requires a mined transaction with a positive block number, a successful receipt, the expected Gateway wallet as `tx.to`, outer `submitBatch` input, the expected inner Gateway wallet, expected domain, and configured expected token.
 
-`signature`, `paymentSignature`, `xPayment`, `paymentHeader`, `eip712`, `typedData`, `entitySecret`, `entitySecretCiphertext`, `privateKey`, `apiKey`, `authorization`, `walletId`
+## Portable evidence metadata safety
 
-Any match → encode throws, decode returns null.
+`encodeBatchProof` and `decodeBatchProof` recursively reject unsafe fields including signatures, payment headers, EIP-712 payloads, authorization objects, API keys, wallet IDs, private keys, and entity secrets. They also validate the exact public schema, enum values, finite nonnegative counts, EVM hashes/addresses, safe explorer URLs, and JSON-compatible values.
 
-### Explorer URL allowlist
+## Optional live Arc Testnet check
 
-`safeExplorerUrl` validates against a configurable allowlist. Default: `testnet.arcscan.app`, `arc-testnet.blockscout.com`, `arcscan.app`, `arc.blockscout.com`.
+The live suite is skipped unless explicitly enabled:
+
+```bash
+RUN_LIVE_ARC_TESTS=1 \
+ARC_TESTNET_RPC_URL=https://rpc.testnet.arc.network \
+LIVE_BATCH_TX_HASH=<real-pinned-Arc-Testnet-submitBatch-hash> \
+npm test
+```
+
+No live transaction was used by the default deterministic test run. Do not replace the placeholder with a fabricated hash; supply a real pinned Arc Testnet transaction when enabling this suite. Optional `LIVE_EXPECTED_BUYER` and `LIVE_EXPECTED_SELLER` values exercise signed-delta lookups.
 
 ## License
 

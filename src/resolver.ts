@@ -1,215 +1,369 @@
 /**
- * Optional resolver adapter — resolves a Circle Gateway settlement UUID
- * to an on-chain submitBatch tx hash and verified proof.
+ * Optional resolver adapter for Circle Gateway batch evidence.
  *
- * This module makes external HTTP calls:
- *   1. Circle Gateway API (public, no API key)
- *   2. Arc explorer API (public)
- *   3. Arc RPC (viem PublicClient)
- *
- * Returns only safe proof metadata. Never returns raw Gateway responses,
- * payment signatures, or secrets.
- *
- * TIMESTAMP MATCHING IS CANDIDATE DISCOVERY ONLY.
- * Decoded batch deltas are the proof signal when expected addresses are provided.
+ * The resolver separates Gateway transfer status from on-chain verification:
+ * timing finds candidates; strict RPC validation produces decoded batch
+ * evidence; expected signed deltas can establish address participation only.
+ * No raw Gateway responses, signatures, payment headers, or secrets escape.
  */
 
 import { createPublicClient, http, type PublicClient } from "viem";
-import { isUuid, isEvmTxHash } from "./guards.js";
-import { buildArcExplorerTxUrl, findNearestSubmitBatch } from "./explorer.js";
+import { isEvmAddress, isEvmTxHash, isUuid } from "./guards.js";
+import {
+  buildArcExplorerTxUrl,
+  findSubmitBatchCandidates,
+  safeExplorerUrl,
+  type SubmitBatchCandidate,
+} from "./explorer.js";
 import { decodeBatchTx } from "./decode-batch-tx.js";
 import { buyerInBatch, sellerInBatch } from "./net-transfers.js";
 import type {
-  X402BatchProof,
-  ResolveOptions,
+  DecodedBatch,
   GatewayTransferStatus,
   MatchedBy,
+  ResolveOptions,
+  VerificationLevel,
+  X402BatchProof,
 } from "./types.js";
 
 const DEFAULT_GATEWAY_API = "https://gateway-api-testnet.circle.com";
 const DEFAULT_ARC_EXPLORER = "https://testnet.arcscan.app";
+const DEFAULT_ARC_RPC = "https://rpc.testnet.arc.network";
 const DEFAULT_GATEWAY_WALLET = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
-const DEFAULT_MAX_PAGES = 10;
+const DEFAULT_DOMAIN = 26;
+const ACTIVE_GATEWAY_STATUSES = new Set(["completed", "confirmed"]);
+const LIMITATIONS = [
+  "Circle Gateway transfer status is canonical for the transfer UUID.",
+  "Timestamp matching is candidate discovery only.",
+  "Buyer/seller delta presence proves address participation in a netted batch, not a unique x402 transfer.",
+  "Exact payment amount attribution is not implemented.",
+  "Portable evidence metadata is unsigned and is not a cryptographic attestation.",
+  "Direct smart-contract verification and an official UUID-to-batch mapping are not provided.",
+];
 
-/**
- * Fetch safe transfer status from Circle Gateway public API.
- * Returns null if the fetch fails or response is malformed.
- */
+type CandidateSource = "gateway_txhash_field" | "manual_tx" | "timestamp_candidate";
+type EvaluatedCandidate = {
+  candidate: SubmitBatchCandidate;
+  source: CandidateSource;
+  decoded: DecodedBatch | null;
+  buyerMatched: boolean;
+  sellerMatched: boolean;
+};
+
+function parseTimestamp(value: string | null): number | null {
+  if (!value || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractGatewayTxHash(data: Record<string, unknown>): `0x${string}` | null {
+  const transaction = data["transaction"];
+  const possibleValues: unknown[] = [
+    typeof transaction === "object" && transaction !== null && !Array.isArray(transaction)
+      ? (transaction as Record<string, unknown>)["txHash"]
+      : undefined,
+    data["txHash"],
+    transaction,
+  ];
+  for (const value of possibleValues) {
+    if (isEvmTxHash(value)) return value;
+  }
+  return null;
+}
+
 async function fetchGatewayTransferStatus(
   gatewayApiUrl: string,
   settlementId: string,
 ): Promise<GatewayTransferStatus | null> {
   try {
-    const resp = await fetch(
+    const response = await fetch(
       `${gatewayApiUrl}/v1/x402/transfers/${encodeURIComponent(settlementId)}`,
       { signal: AbortSignal.timeout(10_000) },
     );
-    if (!resp.ok) return null;
-
-    const data = (await resp.json()) as Record<string, unknown>;
-
+    if (!response.ok) return null;
+    const value: unknown = await response.json();
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const data = value as Record<string, unknown>;
     return {
       status: typeof data["status"] === "string" ? data["status"] : "unknown",
-      fromAddress:
-        typeof data["fromAddress"] === "string" ? data["fromAddress"] : null,
-      toAddress:
-        typeof data["toAddress"] === "string" ? data["toAddress"] : null,
+      fromAddress: typeof data["fromAddress"] === "string" ? data["fromAddress"] : null,
+      toAddress: typeof data["toAddress"] === "string" ? data["toAddress"] : null,
       amount: typeof data["amount"] === "string" ? data["amount"] : null,
       token: typeof data["token"] === "string" ? data["token"] : null,
-      createdAt:
-        typeof data["createdAt"] === "string" ? data["createdAt"] : null,
-      updatedAt:
-        typeof data["updatedAt"] === "string" ? data["updatedAt"] : null,
+      createdAt: typeof data["createdAt"] === "string" ? data["createdAt"] : null,
+      updatedAt: typeof data["updatedAt"] === "string" ? data["updatedAt"] : null,
+      transactionHash: extractGatewayTxHash(data),
     };
   } catch {
     return null;
   }
 }
 
-/**
- * Resolve a Circle Gateway settlement UUID to a verified on-chain batch proof.
- *
- * Resolution strategy:
- *   1. Fetch Gateway transfer status (safe fields only)
- *   2. If status not completed/confirmed → return unresolved
- *   3. Scan Arc explorer for submitBatch candidate (timestamp-based)
- *   4. Decode candidate tx calldata
- *   5. If expectedBuyer/Seller provided → verify via decoded delta evidence
- *
- * Timestamp matching alone is NOT proof. Decoded buyer/seller deltas are the proof signal.
- */
-export async function resolveX402BatchProof(
-  opts: ResolveOptions,
-): Promise<X402BatchProof> {
-  const {
-    settlementId,
-    gatewayApiUrl = DEFAULT_GATEWAY_API,
-    arcExplorerApiUrl = DEFAULT_ARC_EXPLORER,
-    gatewayWalletAddress = DEFAULT_GATEWAY_WALLET,
-    expectedBuyer,
-    expectedSeller,
-    rpcUrl,
-    maxPages = DEFAULT_MAX_PAGES,
-  } = opts;
+function validGatewayWallet(value: string): `0x${string}` | null {
+  return isEvmAddress(value) ? value : null;
+}
 
-  // Validate settlement UUID
-  if (!isUuid(settlementId)) {
-    return makeEmptyProof("unresolved", settlementId);
-  }
-
-  // Fetch Gateway transfer status
-  const gwStatus = await fetchGatewayTransferStatus(gatewayApiUrl, settlementId);
-
-  if (!gwStatus) {
-    return makeEmptyProof("gateway_fetch_failed", settlementId);
-  }
-
-  const status = gwStatus.status.toLowerCase();
-  const completedStatuses = new Set(["completed", "confirmed"]);
-  if (!completedStatuses.has(status)) {
-    return {
-      ...makeEmptyProof("unresolved", settlementId),
-      status: status as X402BatchProof["status"],
-    };
-  }
-
-  // Scan Arc explorer for submitBatch candidate
-  const updatedAtMs = gwStatus.updatedAt
-    ? new Date(gwStatus.updatedAt).getTime()
-    : Date.now();
-
-  let txHash: string | null = null;
-  let matchedBy: MatchedBy = "timestamp_candidate";
-
-  try {
-    txHash = await findNearestSubmitBatch(
-      arcExplorerApiUrl,
-      gatewayWalletAddress,
-      updatedAtMs,
-      maxPages,
-    );
-  } catch {
-    // Explorer scan failed — continue with no tx
-  }
-
-  if (!txHash) {
-    return {
-      ...makeEmptyProof("unresolved", settlementId),
-      gatewayWallet: gatewayWalletAddress as `0x${string}`,
-    };
-  }
-
-  // Decode candidate tx
-  let decoded: Awaited<ReturnType<typeof decodeBatchTx>> = null;
-  if (rpcUrl) {
-    const client = createPublicClient({ transport: http(rpcUrl) });
-    decoded = await decodeBatchTx(txHash, client);
-  }
-
-  // Verify buyer/seller if expected addresses provided
-  let buyerVerified = false;
-  let sellerVerified = false;
-  let buyerEntry: X402BatchProof["buyerEntry"];
-  let sellerEntry: X402BatchProof["sellerEntry"];
-
-  if (decoded) {
-    if (expectedBuyer) {
-      const check = buyerInBatch(decoded, expectedBuyer);
-      buyerVerified = check.found;
-      if (check.entry) {
-        buyerEntry = { address: check.entry.address, usdc: check.entry.usdc };
-      }
-    }
-    if (expectedSeller) {
-      const check = sellerInBatch(decoded, expectedSeller);
-      sellerVerified = check.found;
-      if (check.entry) {
-        sellerEntry = { address: check.entry.address, usdc: check.entry.usdc };
-      }
-    }
-
-    // If buyer+seller verified via delta evidence, upgrade matchedBy
-    if (
-      (expectedBuyer && buyerVerified) ||
-      (expectedSeller && sellerVerified)
-    ) {
-      matchedBy = "decoded_delta";
-    }
-  }
-
-  const explorerUrl = buildArcExplorerTxUrl(txHash, arcExplorerApiUrl);
-
+function candidateForHash(
+  txHash: `0x${string}`,
+  updatedAt: string | null,
+  updatedAtMs: number | null,
+): SubmitBatchCandidate {
   return {
-    v: 1,
-    settlementId,
-    status: "completed",
-    txHash: txHash as `0x${string}`,
-    explorerUrl,
-    batchId: decoded?.batchId,
-    domain: decoded?.domain,
-    token: decoded?.token,
-    gatewayWallet: gatewayWalletAddress as `0x${string}`,
-    entriesCount: decoded?.entries.length ?? 0,
-    netTransfersCount: decoded?.netTransfers.length ?? 0,
-    buyerVerified: expectedBuyer ? buyerVerified : undefined,
-    sellerVerified: expectedSeller ? sellerVerified : undefined,
-    buyerEntry,
-    sellerEntry,
-    matchedBy,
+    txHash,
+    timestamp: updatedAt ?? "",
+    timestampMs: updatedAtMs ?? 0,
+    distanceMs: 0,
   };
 }
 
 function makeEmptyProof(
-  status: X402BatchProof["status"],
-  settlementId?: string,
+  settlementId: string,
+  verificationLevel: VerificationLevel,
+  gatewayStatus?: string,
+  gatewayWallet?: `0x${string}`,
 ): X402BatchProof {
   return {
     v: 1,
     settlementId,
-    status,
+    gatewayStatus,
+    status: gatewayStatus,
+    verificationLevel,
     txHash: null,
     explorerUrl: null,
+    gatewayWallet,
     entriesCount: 0,
     netTransfersCount: 0,
+    limitations: LIMITATIONS,
+  };
+}
+
+function buildExplorerUrl(
+  txHash: `0x${string}`,
+  explorerBase: string,
+): string | null {
+  return safeExplorerUrl(buildArcExplorerTxUrl(txHash, explorerBase));
+}
+
+function chooseDecodedCandidate(
+  candidates: EvaluatedCandidate[],
+  expectedBuyer?: `0x${string}`,
+  expectedSeller?: `0x${string}`,
+): EvaluatedCandidate | undefined {
+  const decoded = candidates.filter((candidate) => candidate.decoded !== null);
+  if (!decoded.length) return undefined;
+  if (expectedBuyer && expectedSeller) {
+    const both = decoded.find((candidate) => candidate.buyerMatched && candidate.sellerMatched);
+    if (both) return both;
+    const either = decoded.find((candidate) => candidate.buyerMatched || candidate.sellerMatched);
+    if (either) return either;
+  } else if (expectedBuyer) {
+    const buyer = decoded.find((candidate) => candidate.buyerMatched);
+    if (buyer) return buyer;
+  } else if (expectedSeller) {
+    const seller = decoded.find((candidate) => candidate.sellerMatched);
+    if (seller) return seller;
+  }
+  return decoded[0];
+}
+
+function hasRequiredAddressParticipation(
+  buyerMatched: boolean,
+  sellerMatched: boolean,
+  expectedBuyer?: `0x${string}`,
+  expectedSeller?: `0x${string}`,
+): boolean {
+  if (expectedBuyer && expectedSeller) return buyerMatched && sellerMatched;
+  if (expectedBuyer) return buyerMatched;
+  if (expectedSeller) return sellerMatched;
+  return false;
+}
+
+/**
+ * Resolve a Circle Gateway settlement UUID into portable batch evidence.
+ * A timestamp candidate is never upgraded without strict RPC decoding.
+ */
+export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402BatchProof> {
+  const {
+    settlementId,
+    gatewayApiUrl = DEFAULT_GATEWAY_API,
+    arcExplorerApiUrl = DEFAULT_ARC_EXPLORER,
+    expectedBuyer,
+    expectedSeller,
+    maxPages = 10,
+    maxDistanceMs,
+    manualTxHash,
+  } = opts;
+  const gatewayWallet = opts.expectedGatewayWallet ?? opts.gatewayWalletAddress ?? DEFAULT_GATEWAY_WALLET;
+  const gatewayWalletTyped = validGatewayWallet(gatewayWallet);
+
+  if (!isUuid(settlementId)) {
+    return makeEmptyProof(settlementId, "unresolved", undefined, gatewayWalletTyped ?? undefined);
+  }
+
+  const gatewayStatus = await fetchGatewayTransferStatus(gatewayApiUrl, settlementId);
+  if (!gatewayStatus) {
+    return makeEmptyProof(
+      settlementId,
+      "unresolved",
+      undefined,
+      gatewayWalletTyped ?? undefined,
+    );
+  }
+
+  const gatewayStatusText = gatewayStatus.status;
+  const normalizedStatus = gatewayStatusText.toLowerCase();
+  const baseProof = {
+    gatewayStatus: gatewayStatusText,
+    status: gatewayStatusText,
+    gatewayWallet: gatewayWalletTyped ?? undefined,
+  };
+
+  if (!ACTIVE_GATEWAY_STATUSES.has(normalizedStatus)) {
+    return {
+      ...makeEmptyProof(
+        settlementId,
+        "unresolved",
+        gatewayStatusText,
+        gatewayWalletTyped ?? undefined,
+      ),
+      ...baseProof,
+    };
+  }
+
+  const updatedAtMs = parseTimestamp(gatewayStatus.updatedAt);
+  const candidates: { candidate: SubmitBatchCandidate; source: CandidateSource }[] = [];
+  if (gatewayStatus.transactionHash) {
+    candidates.push({
+      candidate: candidateForHash(
+        gatewayStatus.transactionHash,
+        gatewayStatus.updatedAt,
+        updatedAtMs,
+      ),
+      source: "gateway_txhash_field",
+    });
+  }
+  if (manualTxHash && isEvmTxHash(manualTxHash)) {
+    candidates.push({
+      candidate: candidateForHash(manualTxHash, gatewayStatus.updatedAt, updatedAtMs),
+      source: "manual_tx",
+    });
+  }
+  if (gatewayWalletTyped && updatedAtMs !== null) {
+    try {
+      const explorerCandidates = await findSubmitBatchCandidates(
+        arcExplorerApiUrl,
+        gatewayWalletTyped,
+        updatedAtMs,
+        maxPages,
+        maxDistanceMs,
+      );
+      const known = new Set(candidates.map(({ candidate }) => candidate.txHash.toLowerCase()));
+      for (const candidate of explorerCandidates) {
+        if (!known.has(candidate.txHash.toLowerCase())) {
+          candidates.push({ candidate, source: "timestamp_candidate" });
+        }
+      }
+    } catch {
+      // Candidate discovery is best-effort; a Gateway hash/manual hash can still be decoded.
+    }
+  }
+
+  if (!candidates.length) {
+    return {
+      ...makeEmptyProof(settlementId, "unresolved", gatewayStatusText, gatewayWalletTyped ?? undefined),
+      ...baseProof,
+    };
+  }
+
+  let client: PublicClient;
+  try {
+    client = opts.rpcClient ?? createPublicClient({ transport: http(opts.rpcUrl ?? DEFAULT_ARC_RPC) });
+  } catch {
+    return {
+      ...makeEmptyProof(settlementId, "timestamp_candidate", gatewayStatusText, gatewayWalletTyped ?? undefined),
+      ...baseProof,
+      txHash: candidates[0]!.candidate.txHash,
+      explorerUrl: buildExplorerUrl(candidates[0]!.candidate.txHash, arcExplorerApiUrl),
+      matchedBy: candidates[0]!.source,
+    };
+  }
+
+  const evaluated: EvaluatedCandidate[] = [];
+  for (const { candidate, source } of candidates) {
+    const decoded = await decodeBatchTx(candidate.txHash, client, {
+      requireReceipt: true,
+      expectedGatewayWallet: gatewayWalletTyped ?? undefined,
+      expectedDomain: opts.expectedDomain ?? DEFAULT_DOMAIN,
+      expectedToken: opts.expectedToken,
+    });
+    const buyerMatched = decoded && expectedBuyer
+      ? buyerInBatch(decoded, expectedBuyer).found
+      : false;
+    const sellerMatched = decoded && expectedSeller
+      ? sellerInBatch(decoded, expectedSeller).found
+      : false;
+    evaluated.push({ candidate, source, decoded, buyerMatched, sellerMatched });
+  }
+
+  const selectedDecoded = chooseDecodedCandidate(evaluated, expectedBuyer, expectedSeller);
+  const selected = selectedDecoded ?? evaluated[0]!;
+  if (!selected.decoded) {
+    return {
+      ...makeEmptyProof(
+        settlementId,
+        "timestamp_candidate",
+        gatewayStatusText,
+        gatewayWalletTyped ?? undefined,
+      ),
+      ...baseProof,
+      txHash: selected.candidate.txHash,
+      explorerUrl: buildExplorerUrl(selected.candidate.txHash, arcExplorerApiUrl),
+      matchedBy: selected.source,
+    };
+  }
+
+  const decoded = selected.decoded;
+  const addressParticipation = hasRequiredAddressParticipation(
+    selected.buyerMatched,
+    selected.sellerMatched,
+    expectedBuyer,
+    expectedSeller,
+  );
+  const verificationLevel: VerificationLevel = addressParticipation
+    ? "address_participation"
+    : "decoded_batch";
+  const matchedBy: MatchedBy | undefined =
+    selected.source === "gateway_txhash_field"
+      ? "gateway_txhash_field"
+      : selected.source === "manual_tx"
+        ? "manual_tx"
+        : expectedBuyer || expectedSeller
+          ? "decoded_delta"
+          : undefined;
+  const buyerCheck = expectedBuyer ? buyerInBatch(decoded, expectedBuyer) : undefined;
+  const sellerCheck = expectedSeller ? sellerInBatch(decoded, expectedSeller) : undefined;
+
+  return {
+    v: 1,
+    settlementId,
+    ...baseProof,
+    verificationLevel,
+    matchedBy,
+    txHash: selected.candidate.txHash,
+    explorerUrl: buildExplorerUrl(selected.candidate.txHash, arcExplorerApiUrl),
+    batchId: decoded.batchId,
+    domain: decoded.domain,
+    token: decoded.token,
+    entriesCount: decoded.entries.length,
+    netTransfersCount: decoded.netTransfers.length,
+    buyerVerified: expectedBuyer ? buyerCheck!.found : undefined,
+    sellerVerified: expectedSeller ? sellerCheck!.found : undefined,
+    buyerEntry: buyerCheck?.entry
+      ? { address: buyerCheck.entry.address, usdc: buyerCheck.entry.usdc }
+      : undefined,
+    sellerEntry: sellerCheck?.entry
+      ? { address: sellerCheck.entry.address, usdc: sellerCheck.entry.usdc }
+      : undefined,
+    limitations: LIMITATIONS,
   };
 }

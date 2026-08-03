@@ -6,7 +6,8 @@ const VALID_PROOF: X402BatchProof = {
   v: 1,
   settlementId: "550e8400-e29b-41d4-a716-446655440000",
   status: "completed",
-  txHash: "0x" + "a".repeat(64),
+  verificationLevel: "address_participation",
+  txHash: ("0x" + "a".repeat(64)) as `0x${string}`,
   explorerUrl: "https://testnet.arcscan.app/tx/0x" + "a".repeat(64),
   batchId: ("0x" + "b".repeat(64)) as `0x${string}`,
   domain: 26,
@@ -48,6 +49,7 @@ describe("encodeBatchProof / decodeBatchProof roundtrip", () => {
   it("roundtrips minimal proof (txHash null)", () => {
     const minimal: X402BatchProof = {
       v: 1,
+      verificationLevel: "unresolved",
       txHash: null,
       explorerUrl: null,
       entriesCount: 0,
@@ -78,6 +80,22 @@ describe("encodeBatchProof / decodeBatchProof roundtrip", () => {
   it("rejects non-object JSON on decode", () => {
     const b64 = Buffer.from('"hello"').toString("base64");
     expect(decodeBatchProof(b64)).toBeNull();
+  });
+
+  it.each([
+    ["bad tx hash", { txHash: "0x123" }],
+    ["bad explorer URL", { explorerUrl: "https://evil.example/tx/0x" + "a".repeat(64) }],
+    ["negative count", { entriesCount: -1 }],
+    ["bad verification enum", { verificationLevel: "verified" }],
+    ["unsupported nested value", { extra: { value: NaN } }],
+  ])("rejects %s", (_label, patch) => {
+    expect(() => encodeBatchProof({ ...VALID_PROOF, ...patch } as X402BatchProof)).toThrow();
+  });
+
+  it("rejects unknown top-level schema fields on decode", () => {
+    const json = JSON.stringify({ ...VALID_PROOF, unknown: true });
+    const encoded = Buffer.from(json).toString("base64url");
+    expect(decodeBatchProof(encoded)).toBeNull();
   });
 });
 

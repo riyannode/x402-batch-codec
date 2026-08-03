@@ -77,4 +77,33 @@ describe("decodeSubmitBatchCalldataBytes", () => {
       ),
     ).toBeNull();
   });
+
+  it.each([
+    ["missing prefix", "aa"],
+    ["odd-length hex", "0x" + "a".repeat(511)],
+    ["bad dynamic offset", "0x" + "00".repeat(32 * 6)],
+  ])("rejects %s", (_label, value) => {
+    expect(decodeSubmitBatchCalldataBytes(value as `0x${string}`)).toBeNull();
+  });
+
+  it("rejects an out-of-range domain", () => {
+    const valid = buildFixture();
+    const words = valid.slice(2).match(/.{64}/g)!;
+    words[2] = "100000000".padStart(64, "0");
+    expect(decodeSubmitBatchCalldataBytes(`0x${words.join("")}` as `0x${string}`)).toBeNull();
+  });
+
+  it("rejects a non-zero-padded address word", () => {
+    const valid = buildFixture();
+    const words = valid.slice(2).match(/.{64}/g)!;
+    words[6] = "1".repeat(24) + words[6]!.slice(24);
+    expect(decodeSubmitBatchCalldataBytes(`0x${words.join("")}` as `0x${string}`)).toBeNull();
+  });
+
+  it("enforces the configured entry limit", () => {
+    const valid = buildFixture();
+    expect(
+      decodeSubmitBatchCalldataBytes(valid, { maxEntries: 1 }),
+    ).toBeNull();
+  });
 });
