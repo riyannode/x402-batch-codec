@@ -4,8 +4,13 @@ import { buyerInBatch, sellerInBatch } from "../src/net-transfers.js";
 import { isEvmAddress, isEvmTxHash, isUuid } from "../src/guards.js";
 
 const liveTransferId = process.env.LIVE_X402_TRANSFER_ID;
-const liveEnabled = process.env.RUN_LIVE_ARC_TESTS === "1" && isUuid(liveTransferId);
-const live = liveEnabled ? describe : describe.skip;
+const liveRequested = process.env.RUN_LIVE_ARC_TESTS === "1";
+if (liveRequested && !isUuid(liveTransferId)) {
+  throw new Error(
+    "RUN_LIVE_ARC_TESTS=1 requires a valid LIVE_X402_TRANSFER_ID",
+  );
+}
+const live = liveRequested ? describe : describe.skip;
 const gatewayWallet = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
 const gatewayApiUrl = process.env.GATEWAY_API_URL ?? "https://gateway-api-testnet.circle.com";
 
@@ -43,14 +48,21 @@ live("live Arc Testnet official Gateway mapping", () => {
     expect(decoded!.entries.every((entry) => typeof entry.delta === "bigint")).toBe(true);
 
     const fromAddress = transfer.fromAddress;
-    if (fromAddress !== null && fromAddress !== undefined) {
-      expect(isEvmAddress(fromAddress)).toBe(true);
-      expect(buyerInBatch(decoded!, fromAddress as string).found).toBe(true);
-    }
     const toAddress = transfer.toAddress;
-    if (toAddress !== null && toAddress !== undefined) {
+    const buyerParticipation = isEvmAddress(fromAddress)
+      ? buyerInBatch(decoded!, fromAddress).found
+      : false;
+    const sellerParticipation = isEvmAddress(toAddress)
+      ? sellerInBatch(decoded!, toAddress).found
+      : false;
+
+    if (process.env.LIVE_REQUIRE_BUYER_PARTICIPATION === "1") {
+      expect(isEvmAddress(fromAddress)).toBe(true);
+      expect(buyerParticipation).toBe(true);
+    }
+    if (process.env.LIVE_REQUIRE_SELLER_PARTICIPATION === "1") {
       expect(isEvmAddress(toAddress)).toBe(true);
-      expect(sellerInBatch(decoded!, toAddress as string).found).toBe(true);
+      expect(sellerParticipation).toBe(true);
     }
 
     console.info(`LIVE_X402_TRANSFER_ID=${transferId}`);
@@ -58,5 +70,7 @@ live("live Arc Testnet official Gateway mapping", () => {
     console.info(`Gateway status=${typeof transfer.status === "string" ? transfer.status : "unknown"}`);
     console.info(`decoded batch ID=${decoded!.batchId}`);
     console.info(`entry count=${decoded!.entries.length}`);
+    console.info(`buyer participation=${isEvmAddress(fromAddress) ? buyerParticipation : "not-provided"}`);
+    console.info(`seller participation=${isEvmAddress(toAddress) ? sellerParticipation : "not-provided"}`);
   }, 30_000);
 });

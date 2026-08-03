@@ -165,7 +165,7 @@ function validateProof(value: unknown): value is X402BatchProof {
   if (obj["fromAddress"] !== undefined && !isEvmAddress(obj["fromAddress"])) return false;
   if (obj["toAddress"] !== undefined && !isEvmAddress(obj["toAddress"])) return false;
   if (obj["amountAtomic"] !== undefined && !validAtomicString(obj["amountAtomic"])) return false;
-  if (obj["nonce"] !== undefined && !validAtomicString(obj["nonce"])) return false;
+  if (obj["nonce"] !== undefined && !isBytes32(obj["nonce"])) return false;
   if (obj["batchId"] !== undefined && !isBytes32(obj["batchId"])) return false;
   if (obj["domain"] !== undefined && (!validNonnegativeInteger(obj["domain"]) || obj["domain"] > 0xffff_ffff)) return false;
   if (obj["token"] !== undefined && !isEvmAddress(obj["token"])) return false;

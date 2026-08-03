@@ -12,6 +12,7 @@ const SELLER = "0x0000000000000000000000000000000000000002";
 const WRONG = "0x0000000000000000000000000000000000000003";
 const TX_HASH = ("0x" + "a".repeat(64)) as `0x${string}`;
 const OTHER_TX_HASH = ("0x" + "b".repeat(64)) as `0x${string}`;
+const NONCE = ("0x" + "1".repeat(64)) as `0x${string}`;
 const UPDATED_AT = "2026-01-01T00:00:00.000Z";
 const CANDIDATE_TIME = "2026-01-01T00:00:01.000Z";
 
@@ -197,7 +198,7 @@ describe("Circle transfer validation and status gating", () => {
       fromAddress: BUYER,
       toAddress: SELLER,
       amount: "1000000",
-      nonce: "42",
+      nonce: NONCE,
       createdAt: UPDATED_AT,
     }));
     expect(result.transferId).toBe(SETTLEMENT_ID);
@@ -207,17 +208,41 @@ describe("Circle transfer validation and status gating", () => {
     expect(result.fromAddress).toBe(BUYER);
     expect(result.toAddress).toBe(SELLER);
     expect(result.amountAtomic).toBe("1000000");
-    expect(result.nonce).toBe("42");
+    expect(result.nonce).toBe(NONCE);
   });
 
-  it("preserves decimal atomic amount strings and safely parses numeric nonce", async () => {
+  it("preserves decimal atomic amount strings and rejects a JavaScript number nonce", async () => {
     const result = await resolveOfficial(gatewayBody("completed", {
       txHash: TX_HASH,
       amount: "0001000",
       nonce: 7,
     }));
-    expect(result.amountAtomic).toBe("0001000");
-    expect(result.nonce).toBe("7");
+    expect(result.verificationLevel).toBe("unresolved");
+    expect(result.txHash).toBeNull();
+  });
+
+  it.each([
+    ["null", null],
+    ["missing", undefined],
+  ])("accepts a %s nonce as absent metadata", async (_label, nonce) => {
+    const body = gatewayBody("completed", { txHash: TX_HASH });
+    if (nonce !== undefined) body.nonce = nonce;
+    const result = await resolveOfficial(body);
+    expect(result.verificationLevel).toBe("decoded_batch");
+    expect(result).not.toHaveProperty("nonce");
+  });
+
+  it.each([
+    ["decimal string", "42"],
+    ["short hex", "0x1234"],
+    ["malformed hex", "0x" + "g".repeat(64)],
+  ])("rejects a %s nonce", async (_label, nonce) => {
+    const result = await resolveOfficial(gatewayBody("completed", {
+      txHash: TX_HASH,
+      nonce,
+    }));
+    expect(result.verificationLevel).toBe("unresolved");
+    expect(result.txHash).toBeNull();
   });
 
   it.each([

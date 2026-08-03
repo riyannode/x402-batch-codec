@@ -139,7 +139,7 @@ export type GatewayTransferStatus = {
   fromAddress: string | null;
   toAddress: string | null;
   amount: string | null;
-  nonce: string | null;
+  nonce: `0x${string}` | null;
   txHash: `0x${string}` | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -159,7 +159,7 @@ It is not:
 - a Solidity-verifiable receipt; or
 - an authoritative one-to-one transfer proof.
 
-Safe canonical fields may include `transferId`, `gatewayStatus`, `sendingNetwork`, `recipientNetwork`, `fromAddress`, `toAddress`, `amountAtomic`, `nonce`, and `officialBatchTxHash`. Addresses and hashes are validated; atomic amounts and nonces remain decimal strings. Unknown object keys, non-finite numbers, signatures, private keys, credentials, payment headers, and EIP-712 payloads are rejected recursively.
+Safe canonical fields may include `transferId`, `gatewayStatus`, `sendingNetwork`, `recipientNetwork`, `fromAddress`, `toAddress`, `amountAtomic`, `nonce`, and `officialBatchTxHash`. Addresses and hashes are validated; atomic amounts remain decimal strings, while an EIP-3009 nonce is either absent/null or `0x` followed by exactly 64 hexadecimal characters (bytes32). Unknown object keys, non-finite numbers, signatures, private keys, credentials, payment headers, and EIP-712 payloads are rejected recursively.
 
 ## API reference
 
@@ -194,7 +194,7 @@ ARC_TESTNET_RPC_URL=https://rpc.testnet.arc.network \
 npm test
 ```
 
-The live test fetches `GET /v1/x402/transfers/{LIVE_X402_TRANSFER_ID}`, verifies the returned ID, requires the official top-level `txHash`, validates a successful receipt and Gateway Wallet, decodes domain `26`, and checks API-provided buyer/seller participation when addresses are present. It prints only the UUID, official batch hash, status, batch ID, and entry count. If no real UUID is configured, the test remains skipped; no UUID or hash is fabricated.
+The live test fetches `GET /v1/x402/transfers/{LIVE_X402_TRANSFER_ID}`, verifies the returned ID, requires the official top-level `txHash`, validates a successful receipt and Gateway Wallet, decodes domain `26`, and records buyer/seller participation from the netted batch. Participation is informational by default because Gateway may settle the batch through net balance changes rather than one individual negative/positive pair. Set `LIVE_REQUIRE_BUYER_PARTICIPATION=1` and/or `LIVE_REQUIRE_SELLER_PARTICIPATION=1` to assert the corresponding API address appears with the expected signed delta. It prints only the UUID, official batch hash, status, batch ID, entry count, and participation results. If `RUN_LIVE_ARC_TESTS=1` is set without a valid UUID, the test fails explicitly; without that flag, the live suite is skipped and no UUID or hash is fabricated.
 
 ## Development
 

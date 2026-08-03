@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { encodeBatchProof, decodeBatchProof } from "../src/proof-codec.js";
 import type { X402BatchProof } from "../src/types.js";
 
+const NONCE = ("0x" + "1".repeat(64)) as `0x${string}`;
 const VALID_PROOF: X402BatchProof = {
   v: 1,
   settlementId: "550e8400-e29b-41d4-a716-446655440000",
@@ -110,13 +111,13 @@ describe("portable canonical Gateway metadata", () => {
       fromAddress: ("0x" + "1".repeat(40)) as `0x${string}`,
       toAddress: ("0x" + "2".repeat(40)) as `0x${string}`,
       amountAtomic: "1000000",
-      nonce: "42",
+      nonce: NONCE,
       officialBatchTxHash: VALID_PROOF.txHash!,
     };
     const decoded = decodeBatchProof(encodeBatchProof(proof));
     expect(decoded?.gatewayStatus).toBe("completed");
     expect(decoded?.amountAtomic).toBe("1000000");
-    expect(decoded?.nonce).toBe("42");
+    expect(decoded?.nonce).toBe(NONCE);
     expect(decoded?.officialBatchTxHash).toBe(proof.officialBatchTxHash);
   });
 
@@ -124,7 +125,10 @@ describe("portable canonical Gateway metadata", () => {
     ["invalid transfer ID", { transferId: "not-a-uuid" }],
     ["invalid Gateway status", { gatewayStatus: "processing" }],
     ["invalid amount", { amountAtomic: "1.5" }],
-    ["invalid nonce", { nonce: "-1" }],
+    ["decimal nonce", { nonce: "42" }],
+    ["numeric nonce", { nonce: 42 }],
+    ["short hex nonce", { nonce: "0x1234" }],
+    ["malformed hex nonce", { nonce: "0x" + "g".repeat(64) }],
     ["invalid address", { fromAddress: "0x123" }],
     ["invalid official hash", { officialBatchTxHash: "0x123" }],
   ])("rejects %s", (_label, patch) => {

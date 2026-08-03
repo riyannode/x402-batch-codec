@@ -7,7 +7,7 @@
  */
 
 import { createPublicClient, http, type PublicClient } from "viem";
-import { isEvmAddress, isEvmTxHash, isUuid } from "./guards.js";
+import { isBytes32, isEvmAddress, isEvmTxHash, isUuid } from "./guards.js";
 import {
   buildArcExplorerTxUrl,
   findSubmitBatchCandidates,
@@ -109,12 +109,8 @@ function nullableAtomicAmount(value: unknown): string | null {
   return parsed && /^[0-9]+$/.test(parsed) ? parsed : null;
 }
 
-function nullableNonce(value: unknown): string | null {
-  if (typeof value === "number") {
-    return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
-  }
-  const parsed = nullableString(value);
-  return parsed && /^[0-9]+$/.test(parsed) ? parsed : null;
+function nullableNonce(value: unknown): `0x${string}` | null {
+  return isBytes32(value) ? value : null;
 }
 
 function optionalFieldValid(
@@ -169,10 +165,7 @@ function parseGatewayTransfer(
   if (!optionalFieldValid(value, "fromAddress", isEvmAddress)) return null;
   if (!optionalFieldValid(value, "toAddress", isEvmAddress)) return null;
   if (!optionalFieldValid(value, "amount", (field) => typeof field === "string" && /^[0-9]+$/.test(field))) return null;
-  if (!optionalFieldValid(value, "nonce", (field) =>
-    (typeof field === "number" && Number.isSafeInteger(field) && field >= 0) ||
-    (typeof field === "string" && /^[0-9]+$/.test(field)),
-  )) return null;
+  if (!optionalFieldValid(value, "nonce", isBytes32)) return null;
   if (!optionalFieldValid(value, "createdAt", validTimestamp)) return null;
   if (!optionalFieldValid(value, "updatedAt", validTimestamp)) return null;
 

@@ -71,7 +71,7 @@ export type GatewayTransferStatus = {
   fromAddress: string | null;
   toAddress: string | null;
   amount: string | null;
-  nonce: string | null;
+  nonce: `0x${string}` | null;
   txHash: `0x${string}` | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -129,7 +129,7 @@ export type X402BatchProof = {
   fromAddress?: `0x${string}`;
   toAddress?: `0x${string}`;
   amountAtomic?: string;
-  nonce?: string;
+  nonce?: `0x${string}`;
 
   batchId?: `0x${string}`;
   domain?: number;
