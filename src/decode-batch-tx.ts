@@ -15,6 +15,7 @@ import {
 import { SUBMIT_BATCH_ABI } from "./abi.js";
 import { decodeSubmitBatchCalldataBytes } from "./decode-submit-batch.js";
 import { inferNetTransfers } from "./net-transfers.js";
+import { isEvmTxHash } from "./guards.js";
 import type {
   DecodedBatch,
   DecodedSubmitBatchInput,
@@ -79,6 +80,9 @@ export async function decodeBatchTx(
     const tx = await client.getTransaction({
       hash: txHash as `0x${string}`,
     });
+    if (!isEvmTxHash(tx.hash) || tx.hash.toLowerCase() !== txHash.toLowerCase()) {
+      return null;
+    }
     if (!tx.to || tx.blockNumber === null || tx.blockNumber === undefined) {
       return null;
     }

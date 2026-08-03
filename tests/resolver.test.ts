@@ -59,6 +59,7 @@ function rpcClient(options: {
   to?: string;
   receiptStatus?: "success" | "reverted";
   throwOnTransaction?: boolean;
+  returnedHash?: string;
   blockNumber?: bigint | null;
   calls?: { getTransaction: ReturnType<typeof vi.fn> };
 } = {}): PublicClient {
@@ -66,7 +67,7 @@ function rpcClient(options: {
   calls.getTransaction.mockImplementation(async () => {
     if (options.throwOnTransaction) throw new Error("rpc unavailable");
     return {
-      hash: TX_HASH,
+      hash: (options.returnedHash ?? TX_HASH) as `0x${string}`,
       to: (options.to ?? WALLET) as `0x${string}`,
       from: "0x0000000000000000000000000000000000000099" as `0x${string}`,
       input: (options.fixture ?? buildFixture()).input,
@@ -215,8 +216,20 @@ describe("Circle transfer validation and status gating", () => {
       amount: "0001000",
       nonce: 7,
     }));
-    expect(result.amountAtomic).toBeUndefined();
+    expect(result.amountAtomic).toBe("0001000");
     expect(result.nonce).toBe("7");
+  });
+
+  it.each([
+    ["fromAddress", { fromAddress: 42 }],
+    ["amount", { amount: {} }],
+    ["nonce", { nonce: {} }],
+    ["sendingNetwork", { sendingNetwork: 42 }],
+    ["updatedAt", { updatedAt: "not-a-timestamp" }],
+  ])("rejects malformed canonical %s metadata", async (_field, extra) => {
+    const result = await resolveOfficial(gatewayBody("completed", { txHash: TX_HASH, ...extra }));
+    expect(result.verificationLevel).toBe("unresolved");
+    expect(result.txHash).toBeNull();
   });
 });
 
@@ -237,12 +250,21 @@ describe("official txHash precedence and mapping failures", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("uses a nested compatibility hash when top-level txHash is malformed", async () => {
+  it("rejects a malformed top-level txHash instead of using nested compatibility data", async () => {
     const result = await resolveOfficial(gatewayBody("completed", {
       txHash: "0x123",
       transaction: { txHash: OTHER_TX_HASH },
     }));
-    expect(result.txHash).toBe(OTHER_TX_HASH);
+    expect(result.verificationLevel).toBe("unresolved");
+    expect(result.txHash).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a nested compatibility hash when top-level txHash is absent", async () => {
+    const result = await resolveOfficial(gatewayBody("completed", {
+      transaction: { txHash: TX_HASH },
+    }));
+    expect(result.txHash).toBe(TX_HASH);
     expect(result.matchedBy).toBe("gateway_txhash_field");
   });
 
@@ -264,6 +286,7 @@ describe("official txHash precedence and mapping failures", () => {
     ["wrong token", rpcClient({ fixture: buildFixture({ token: WRONG }) })],
     ["invalid calldata", rpcClient({ fixture: { inner: "0x", input: "0xdeadbeef" as `0x${string}` } })],
     ["unmined transaction", rpcClient({ blockNumber: 0n })],
+    ["RPC transaction hash mismatch", rpcClient({ returnedHash: OTHER_TX_HASH })],
   ])("keeps official hash at mapping level for %s", async (_label, client) => {
     const result = await resolveOfficial(gatewayBody("completed", { txHash: TX_HASH }), client, {
       allowLegacyTimestampFallback: true,

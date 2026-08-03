@@ -104,17 +104,17 @@ describe("portable canonical Gateway metadata", () => {
     const proof: X402BatchProof = {
       ...VALID_PROOF,
       transferId: "550e8400-e29b-41d4-a716-446655440000",
-      gatewayStatus: "confirmed",
+      gatewayStatus: "completed",
       sendingNetwork: "eip155:5042002",
       recipientNetwork: "eip155:5042002",
       fromAddress: ("0x" + "1".repeat(40)) as `0x${string}`,
       toAddress: ("0x" + "2".repeat(40)) as `0x${string}`,
       amountAtomic: "1000000",
       nonce: "42",
-      officialBatchTxHash: ("0x" + "e".repeat(64)) as `0x${string}`,
+      officialBatchTxHash: VALID_PROOF.txHash!,
     };
     const decoded = decodeBatchProof(encodeBatchProof(proof));
-    expect(decoded?.gatewayStatus).toBe("confirmed");
+    expect(decoded?.gatewayStatus).toBe("completed");
     expect(decoded?.amountAtomic).toBe("1000000");
     expect(decoded?.nonce).toBe("42");
     expect(decoded?.officialBatchTxHash).toBe(proof.officialBatchTxHash);
@@ -129,6 +129,33 @@ describe("portable canonical Gateway metadata", () => {
     ["invalid official hash", { officialBatchTxHash: "0x123" }],
   ])("rejects %s", (_label, patch) => {
     expect(() => encodeBatchProof({ ...VALID_PROOF, ...patch } as X402BatchProof)).toThrow();
+  });
+  it("rejects contradictory official mapping metadata", () => {
+    expect(() => encodeBatchProof({
+      ...VALID_PROOF,
+      verificationLevel: "official_batch_mapping",
+      matchedBy: "gateway_txhash_field",
+    })).toThrow();
+    expect(() => encodeBatchProof({
+      ...VALID_PROOF,
+      matchedBy: "gateway_txhash_field",
+    })).toThrow();
+    expect(() => encodeBatchProof({
+      ...VALID_PROOF,
+      officialBatchTxHash: ("0x" + "e".repeat(64)) as `0x${string}`,
+    })).toThrow();
+  });
+
+  it("rejects contradictory transfer IDs and statuses", () => {
+    expect(() => encodeBatchProof({
+      ...VALID_PROOF,
+      transferId: "550e8400-e29b-41d4-a716-446655440001",
+    })).toThrow();
+    expect(() => encodeBatchProof({
+      ...VALID_PROOF,
+      gatewayStatus: "confirmed",
+      status: "completed",
+    })).toThrow();
   });
 });
 

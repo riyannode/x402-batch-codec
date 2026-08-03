@@ -3,7 +3,8 @@ import { decodeBatchTxWithRpc } from "../src/decode-batch-tx.js";
 import { buyerInBatch, sellerInBatch } from "../src/net-transfers.js";
 import { isEvmAddress, isEvmTxHash, isUuid } from "../src/guards.js";
 
-const liveEnabled = process.env.RUN_LIVE_ARC_TESTS === "1";
+const liveTransferId = process.env.LIVE_X402_TRANSFER_ID;
+const liveEnabled = process.env.RUN_LIVE_ARC_TESTS === "1" && isUuid(liveTransferId);
 const live = liveEnabled ? describe : describe.skip;
 const gatewayWallet = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
 const gatewayApiUrl = process.env.GATEWAY_API_URL ?? "https://gateway-api-testnet.circle.com";

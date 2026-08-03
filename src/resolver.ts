@@ -106,7 +106,7 @@ function nullableAddress(value: unknown): string | null {
 
 function nullableAtomicAmount(value: unknown): string | null {
   const parsed = nullableString(value);
-  return parsed && /^(0|[1-9][0-9]*)$/.test(parsed) ? parsed : null;
+  return parsed && /^[0-9]+$/.test(parsed) ? parsed : null;
 }
 
 function nullableNonce(value: unknown): string | null {
@@ -114,15 +114,35 @@ function nullableNonce(value: unknown): string | null {
     return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
   }
   const parsed = nullableString(value);
-  return parsed && /^(0|[1-9][0-9]*)$/.test(parsed) ? parsed : null;
+  return parsed && /^[0-9]+$/.test(parsed) ? parsed : null;
+}
+
+function optionalFieldValid(
+  data: Record<string, unknown>,
+  key: string,
+  validator: (value: unknown) => boolean,
+): boolean {
+  return !(key in data) || data[key] === null || validator(data[key]);
+}
+
+function validTimestamp(value: unknown): boolean {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function malformedTopLevelTxHash(data: Record<string, unknown>): boolean {
+  const value = data["txHash"];
+  return "txHash" in data && value !== null && value !== undefined && !isEvmTxHash(value);
 }
 
 function extractGatewayTxHash(data: Record<string, unknown>): `0x${string}` | null {
-  // The top-level field is authoritative whenever it is valid.
+  // A present non-null top-level field is authoritative. If malformed, the
+  // caller rejects the response rather than silently replacing it with a
+  // compatibility field.
   if (isEvmTxHash(data["txHash"])) return data["txHash"];
+  if (malformedTopLevelTxHash(data)) return null;
 
-  // Compatibility with older Gateway response shapes. These never override a
-  // valid top-level txHash.
+  // Compatibility with older Gateway response shapes when the official field
+  // is absent or explicitly null.
   const transaction = data["transaction"];
   if (isRecord(transaction) && isEvmTxHash(transaction["txHash"])) {
     return transaction["txHash"];
@@ -142,6 +162,19 @@ function parseGatewayTransfer(
   if (typeof status !== "string" || !GATEWAY_STATUSES.has(status as GatewayTransferStatusValue)) {
     return null;
   }
+  if (malformedTopLevelTxHash(value)) return null;
+  if (!optionalFieldValid(value, "token", (field) => typeof field === "string" && field.trim().length > 0)) return null;
+  if (!optionalFieldValid(value, "sendingNetwork", (field) => typeof field === "string" && field.trim().length > 0)) return null;
+  if (!optionalFieldValid(value, "recipientNetwork", (field) => typeof field === "string" && field.trim().length > 0)) return null;
+  if (!optionalFieldValid(value, "fromAddress", isEvmAddress)) return null;
+  if (!optionalFieldValid(value, "toAddress", isEvmAddress)) return null;
+  if (!optionalFieldValid(value, "amount", (field) => typeof field === "string" && /^[0-9]+$/.test(field))) return null;
+  if (!optionalFieldValid(value, "nonce", (field) =>
+    (typeof field === "number" && Number.isSafeInteger(field) && field >= 0) ||
+    (typeof field === "string" && /^[0-9]+$/.test(field)),
+  )) return null;
+  if (!optionalFieldValid(value, "createdAt", validTimestamp)) return null;
+  if (!optionalFieldValid(value, "updatedAt", validTimestamp)) return null;
 
   return {
     id,

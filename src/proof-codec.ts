@@ -130,7 +130,7 @@ function validEntry(value: unknown): value is { address: `0x${string}`; usdc: st
 }
 
 function validAtomicString(value: unknown): value is string {
-  return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
+  return typeof value === "string" && /^[0-9]+$/.test(value);
 }
 
 function validNonemptyString(value: unknown): value is string {
@@ -178,6 +178,30 @@ function validateProof(value: unknown): value is X402BatchProof {
     obj["limitations"] !== undefined &&
     (!Array.isArray(obj["limitations"]) || !obj["limitations"].every((x) => typeof x === "string"))
   ) return false;
+
+  if (
+    obj["transferId"] !== undefined &&
+    obj["settlementId"] !== undefined &&
+    obj["transferId"] !== obj["settlementId"]
+  ) return false;
+  if (
+    obj["gatewayStatus"] !== undefined &&
+    obj["status"] !== undefined &&
+    obj["gatewayStatus"] !== obj["status"]
+  ) return false;
+
+  const txHash = obj["txHash"];
+  const officialHash = obj["officialBatchTxHash"];
+  if (officialHash !== undefined && (txHash === null || txHash !== officialHash)) return false;
+  if (obj["verificationLevel"] === "official_batch_mapping") {
+    if (officialHash === undefined || obj["matchedBy"] !== "gateway_txhash_field") return false;
+  }
+  if (obj["matchedBy"] === "gateway_txhash_field") {
+    if (officialHash === undefined || txHash === null || txHash !== officialHash) return false;
+  }
+  if (obj["matchedBy"] === "manual_tx" && txHash === null) return false;
+  if (obj["matchedBy"] === "decoded_delta" && obj["verificationLevel"] !== "address_participation") return false;
+  if (obj["matchedBy"] === "legacy_timestamp_candidate" && txHash === null) return false;
   return true;
 }
 
