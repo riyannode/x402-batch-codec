@@ -1,7 +1,7 @@
 {
   "name": "x402-batch-codec",
-  "version": "0.1.0",
-  "description": "Standalone codec for decoded Circle Gateway submitBatch evidence and address participation on Arc.",
+  "version": "0.2.0",
+  "description": "Portable unsigned evidence codec for Circle Gateway submitBatch batch mappings and Arc address participation.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

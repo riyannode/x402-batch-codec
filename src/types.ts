@@ -50,23 +50,38 @@ export type DecodedSubmitBatchInput = {
   signatureBytesLength: number;
 };
 
-/** Gateway transfer status from Circle's public API. Safe fields only. */
+/** Status values currently returned by Circle Gateway's x402 transfer API. */
+export type GatewayTransferStatusValue =
+  | "received"
+  | "batched"
+  | "confirmed"
+  | "completed"
+  | "failed";
+
+/**
+ * Safe canonical fields parsed from Circle's transfer response.
+ * The raw response and unsupported fields are never returned by this package.
+ */
 export type GatewayTransferStatus = {
-  status: string;
+  id: string;
+  status: GatewayTransferStatusValue;
+  token: string | null;
+  sendingNetwork: string | null;
+  recipientNetwork: string | null;
   fromAddress: string | null;
   toAddress: string | null;
   amount: string | null;
-  token: string | null;
+  nonce: string | null;
+  txHash: `0x${string}` | null;
   createdAt: string | null;
   updatedAt: string | null;
-  /** A validated transaction hash extracted from supported Gateway fields. */
-  transactionHash: `0x${string}` | null;
 };
 
-/** Resolver verification state, deliberately separate from Gateway status. */
+/** Resolver evidence strength, separate from the Circle transfer status. */
 export type VerificationLevel =
   | "unresolved"
-  | "timestamp_candidate"
+  | "official_batch_mapping"
+  | "legacy_timestamp_candidate"
   | "decoded_batch"
   | "address_participation";
 
@@ -76,30 +91,45 @@ export type VerificationLevel =
  */
 export type ProofStatus = string;
 
-/** How the batch tx was matched. */
+/** How the selected batch transaction was matched. */
 export type MatchedBy =
   | "gateway_txhash_field"
-  | "timestamp_candidate"
+  | "manual_tx"
   | "decoded_delta"
-  | "manual_tx";
+  | "legacy_timestamp_candidate";
 
 /**
- * Portable batch evidence metadata. This is unsigned metadata, not a
- * cryptographic proof, attestation, or smart-contract verification result.
+ * Portable unsigned batch evidence metadata.
+ *
+ * This is not a cryptographic proof, a signed Circle attestation, a
+ * Solidity-verifiable receipt, or an authoritative one-to-one transfer proof.
  */
 export type X402BatchProof = {
   v: 1;
+  /** Canonical Circle transfer UUID. */
+  transferId?: string;
+  /** Backward-compatible alias for transferId. */
   settlementId?: string;
 
-  /** Canonical Circle Gateway transfer status, when fetched. */
-  gatewayStatus?: string;
+  /** Canonical Circle Gateway status, when safely parsed. */
+  gatewayStatus?: GatewayTransferStatusValue;
   /** @deprecated Use gatewayStatus and verificationLevel. */
   status?: ProofStatus;
   verificationLevel: VerificationLevel;
   matchedBy?: MatchedBy;
 
+  /** Selected transaction, if any. */
   txHash: `0x${string}` | null;
+  /** Official top-level Circle batch settlement hash, if supplied and valid. */
+  officialBatchTxHash?: `0x${string}`;
   explorerUrl: string | null;
+
+  sendingNetwork?: string;
+  recipientNetwork?: string;
+  fromAddress?: `0x${string}`;
+  toAddress?: `0x${string}`;
+  amountAtomic?: string;
+  nonce?: string;
 
   batchId?: `0x${string}`;
   domain?: number;
@@ -135,7 +165,7 @@ export type DecodeBatchTxOptions = {
   expectedToken?: string;
 };
 
-/** Options for the optional resolver adapter. */
+/** Options for resolving a Circle Gateway x402 transfer into safe evidence. */
 export type ResolveOptions = {
   settlementId: string;
   gatewayApiUrl?: string;
@@ -152,6 +182,8 @@ export type ResolveOptions = {
   rpcClient?: PublicClient;
   maxPages?: number;
   maxDistanceMs?: number;
-  /** Optional operator-supplied transaction hash, never fetched from raw input. */
+  /** Enable the explicitly legacy Arc explorer timestamp heuristic. */
+  allowLegacyTimestampFallback?: boolean;
+  /** Optional operator-supplied transaction hash. */
   manualTxHash?: string;
 };

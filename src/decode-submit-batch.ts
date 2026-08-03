@@ -2,7 +2,7 @@
  * Decode the inner calldataBytes of a submitBatch tx.
  *
  * Layout (per on-chain inspection):
- *   word 0: dynamic offset pointer (typically 0xa0)
+ *   word 0: dynamic entries offset (must equal exactly 0xa0 / 160)
  *   word 1: batchId (bytes32)
  *   word 2: gateway domain (uint32) — 26 = Arc
  *   word 3: token address
@@ -20,6 +20,7 @@ import { formatSignedUsdc } from "./format.js";
 const WORD_HEX_LENGTH = 64;
 const HEADER_WORDS = 6;
 const DEFAULT_MAX_ENTRIES = 10_000;
+const EXPECTED_ENTRIES_OFFSET = 160n;
 const UINT32_MAX = 0xffff_ffffn;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const HEX_RE = /^[0-9a-fA-F]*$/;
@@ -72,17 +73,11 @@ export function decodeSubmitBatchCalldataBytes(
     if (calldata.length % 2 !== 0 || !HEX_RE.test(calldata)) return null;
     if (calldata.length < HEADER_WORDS * WORD_HEX_LENGTH) return null;
 
-    const totalBytes = calldata.length / 2;
     const offset = parseWord(wordAt(calldata, 0));
-    // The current inner layout has five fixed words before the entry payload.
-    // Keep the check bounded and explicit without converting an arbitrary word
-    // to a JavaScript number.
-    if (
-      offset === null ||
-      offset < 5n * 32n ||
-      offset > BigInt(totalBytes) ||
-      offset > MAX_SAFE_BIGINT
-    ) {
+    // Circle Gateway's supported inner layout has a fixed dynamic entries
+    // offset. Reject alternate offsets instead of reading the count from a
+    // fixed word while silently accepting a different ABI layout.
+    if (offset !== EXPECTED_ENTRIES_OFFSET) {
       return null;
     }
 

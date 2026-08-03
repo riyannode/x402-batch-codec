@@ -1,5 +1,7 @@
 /**
- * Explorer URL helpers and timestamp-only submitBatch candidate discovery.
+ * Explorer URL helpers and explicitly legacy timestamp-only submitBatch
+ * candidate discovery. Candidate discovery is heuristic and is not an
+ * official Circle transfer mapping.
  */
 
 import { isEvmTxHash } from "./guards.js";

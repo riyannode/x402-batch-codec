@@ -5,9 +5,14 @@
  * or smart-contract verification result.
  */
 
-import { isBytes32, isEvmAddress, isEvmTxHash } from "./guards.js";
+import { isBytes32, isEvmAddress, isEvmTxHash, isUuid } from "./guards.js";
 import { safeExplorerUrl } from "./explorer.js";
-import type { MatchedBy, VerificationLevel, X402BatchProof } from "./types.js";
+import type {
+  GatewayTransferStatusValue,
+  MatchedBy,
+  VerificationLevel,
+  X402BatchProof,
+} from "./types.js";
 
 const UNSAFE_KEYS = new Set([
   "signature",
@@ -26,25 +31,41 @@ const UNSAFE_KEYS = new Set([
 
 const VERIFICATION_LEVELS = new Set<VerificationLevel>([
   "unresolved",
-  "timestamp_candidate",
+  "official_batch_mapping",
+  "legacy_timestamp_candidate",
   "decoded_batch",
   "address_participation",
 ]);
+const GATEWAY_STATUSES = new Set<GatewayTransferStatusValue>([
+  "received",
+  "batched",
+  "confirmed",
+  "completed",
+  "failed",
+]);
 const MATCHED_BY = new Set<MatchedBy>([
   "gateway_txhash_field",
-  "timestamp_candidate",
-  "decoded_delta",
   "manual_tx",
+  "decoded_delta",
+  "legacy_timestamp_candidate",
 ]);
 const ALLOWED_KEYS = new Set([
   "v",
+  "transferId",
   "settlementId",
   "gatewayStatus",
   "status",
   "verificationLevel",
   "matchedBy",
   "txHash",
+  "officialBatchTxHash",
   "explorerUrl",
+  "sendingNetwork",
+  "recipientNetwork",
+  "fromAddress",
+  "toAddress",
+  "amountAtomic",
+  "nonce",
   "batchId",
   "domain",
   "token",
@@ -108,6 +129,14 @@ function validEntry(value: unknown): value is { address: `0x${string}`; usdc: st
   );
 }
 
+function validAtomicString(value: unknown): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
+}
+
+function validNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function validateProof(value: unknown): value is X402BatchProof {
   if (!validateJsonValue(value)) return false;
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -118,14 +147,25 @@ function validateProof(value: unknown): value is X402BatchProof {
   }
   if (!("txHash" in obj) || !("explorerUrl" in obj)) return false;
   if (obj["txHash"] !== null && !isEvmTxHash(obj["txHash"])) return false;
+  if (obj["officialBatchTxHash"] !== undefined && !isEvmTxHash(obj["officialBatchTxHash"])) return false;
   if (obj["explorerUrl"] !== null && safeExplorerUrl(obj["explorerUrl"]) === null) return false;
   if (!validNonnegativeInteger(obj["entriesCount"])) return false;
   if (!validNonnegativeInteger(obj["netTransfersCount"])) return false;
 
-  if (obj["settlementId"] !== undefined && typeof obj["settlementId"] !== "string") return false;
-  if (obj["gatewayStatus"] !== undefined && typeof obj["gatewayStatus"] !== "string") return false;
+  if (obj["transferId"] !== undefined && !isUuid(obj["transferId"])) return false;
+  if (obj["settlementId"] !== undefined && !isUuid(obj["settlementId"])) return false;
+  if (
+    obj["gatewayStatus"] !== undefined &&
+    !GATEWAY_STATUSES.has(obj["gatewayStatus"] as GatewayTransferStatusValue)
+  ) return false;
   if (obj["status"] !== undefined && typeof obj["status"] !== "string") return false;
   if (obj["matchedBy"] !== undefined && !MATCHED_BY.has(obj["matchedBy"] as MatchedBy)) return false;
+  if (obj["sendingNetwork"] !== undefined && !validNonemptyString(obj["sendingNetwork"])) return false;
+  if (obj["recipientNetwork"] !== undefined && !validNonemptyString(obj["recipientNetwork"])) return false;
+  if (obj["fromAddress"] !== undefined && !isEvmAddress(obj["fromAddress"])) return false;
+  if (obj["toAddress"] !== undefined && !isEvmAddress(obj["toAddress"])) return false;
+  if (obj["amountAtomic"] !== undefined && !validAtomicString(obj["amountAtomic"])) return false;
+  if (obj["nonce"] !== undefined && !validAtomicString(obj["nonce"])) return false;
   if (obj["batchId"] !== undefined && !isBytes32(obj["batchId"])) return false;
   if (obj["domain"] !== undefined && (!validNonnegativeInteger(obj["domain"]) || obj["domain"] > 0xffff_ffff)) return false;
   if (obj["token"] !== undefined && !isEvmAddress(obj["token"])) return false;

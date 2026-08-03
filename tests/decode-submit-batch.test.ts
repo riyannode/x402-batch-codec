@@ -62,6 +62,24 @@ describe("decodeSubmitBatchCalldataBytes", () => {
     expect(result!.entries[1]!.usdc).toBe("1.000000");
   });
 
+  it("accepts the exact 0xa0 dynamic offset", () => {
+    expect(decodeSubmitBatchCalldataBytes(buildFixture())).not.toBeNull();
+  });
+
+  it.each([
+    ["0x80", "80".padStart(64, "0")],
+    ["0xc0", "c0".padStart(64, "0")],
+    ["unaligned", "a1".padStart(64, "0")],
+    ["excessively large", "1".padStart(64, "0") + "0".repeat(63)],
+    ["malformed", "z".repeat(64)],
+  ])("rejects %s dynamic offset", (_label, offsetWord) => {
+    const words = buildFixture().slice(2).match(/.{64}/g)!;
+    words[0] = offsetWord!;
+    expect(
+      decodeSubmitBatchCalldataBytes(`0x${words.join("")}` as `0x${string}`),
+    ).toBeNull();
+  });
+
   it("returns null for too-short input", () => {
     expect(decodeSubmitBatchCalldataBytes("0x1234")).toBeNull();
   });

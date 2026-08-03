@@ -1,10 +1,9 @@
 /**
- * Optional resolver adapter for Circle Gateway batch evidence.
+ * Resolve Circle Gateway x402 transfer metadata into portable batch evidence.
  *
- * The resolver separates Gateway transfer status from on-chain verification:
- * timing finds candidates; strict RPC validation produces decoded batch
- * evidence; expected signed deltas can establish address participation only.
- * No raw Gateway responses, signatures, payment headers, or secrets escape.
+ * The resolver treats Circle's valid top-level txHash as the authoritative
+ * batch mapping. Timestamp discovery is an explicitly opt-in legacy heuristic.
+ * No raw Gateway response, signature, payment header, or secret escapes.
  */
 
 import { createPublicClient, http, type PublicClient } from "viem";
@@ -20,6 +19,7 @@ import { buyerInBatch, sellerInBatch } from "./net-transfers.js";
 import type {
   DecodedBatch,
   GatewayTransferStatus,
+  GatewayTransferStatusValue,
   MatchedBy,
   ResolveOptions,
   VerificationLevel,
@@ -31,17 +31,29 @@ const DEFAULT_ARC_EXPLORER = "https://testnet.arcscan.app";
 const DEFAULT_ARC_RPC = "https://rpc.testnet.arc.network";
 const DEFAULT_GATEWAY_WALLET = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
 const DEFAULT_DOMAIN = 26;
-const ACTIVE_GATEWAY_STATUSES = new Set(["completed", "confirmed"]);
+const GATEWAY_STATUSES = new Set<GatewayTransferStatusValue>([
+  "received",
+  "batched",
+  "confirmed",
+  "completed",
+  "failed",
+]);
+const LEGACY_FALLBACK_STATUSES = new Set<GatewayTransferStatusValue>([
+  "batched",
+  "confirmed",
+  "completed",
+]);
 const LIMITATIONS = [
-  "Circle Gateway transfer status is canonical for the transfer UUID.",
-  "Timestamp matching is candidate discovery only.",
-  "Buyer/seller delta presence proves address participation in a netted batch, not a unique x402 transfer.",
-  "Exact payment amount attribution is not implemented.",
-  "Portable evidence metadata is unsigned and is not a cryptographic attestation.",
-  "Direct smart-contract verification and an official UUID-to-batch mapping are not provided.",
+  "Circle Gateway provides an off-chain HTTP mapping from a transfer UUID to a batch-level txHash; the response is not a signed attestation.",
+  "RPC validation is required to inspect the actual Arc transaction.",
+  "Gateway batch settlement may use net balance deltas.",
+  "Buyer/seller delta presence proves address participation in a netted batch, not a unique one-to-one transfer.",
+  "Exact payment amount attribution is not derived from net deltas.",
+  "Portable unsigned metadata is not a cryptographic proof, signed Circle attestation, or Solidity-verifiable receipt.",
+  "Timestamp matching is retained only as an optional legacy heuristic.",
 ];
 
-type CandidateSource = "gateway_txhash_field" | "manual_tx" | "timestamp_candidate";
+type CandidateSource = "gateway_txhash_field" | "manual_tx" | "legacy_timestamp_candidate";
 type EvaluatedCandidate = {
   candidate: SubmitBatchCandidate;
   source: CandidateSource;
@@ -50,25 +62,101 @@ type EvaluatedCandidate = {
   sellerMatched: boolean;
 };
 
+type GatewayMetadata = Pick<
+  X402BatchProof,
+  | "transferId"
+  | "settlementId"
+  | "gatewayStatus"
+  | "status"
+  | "sendingNetwork"
+  | "recipientNetwork"
+  | "fromAddress"
+  | "toAddress"
+  | "amountAtomic"
+  | "nonce"
+>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function parseTimestamp(value: string | null): number | null {
   if (!value || !value.trim()) return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function extractGatewayTxHash(data: Record<string, unknown>): `0x${string}` | null {
-  const transaction = data["transaction"];
-  const possibleValues: unknown[] = [
-    typeof transaction === "object" && transaction !== null && !Array.isArray(transaction)
-      ? (transaction as Record<string, unknown>)["txHash"]
-      : undefined,
-    data["txHash"],
-    transaction,
-  ];
-  for (const value of possibleValues) {
-    if (isEvmTxHash(value)) return value;
+function nullableString(value: unknown): string | null {
+  return value === null || value === undefined
+    ? null
+    : typeof value === "string"
+      ? value
+      : null;
+}
+
+function nullableNetwork(value: unknown): string | null {
+  const parsed = nullableString(value);
+  return parsed && parsed.trim() ? parsed : null;
+}
+
+function nullableAddress(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return isEvmAddress(value) ? value : null;
+}
+
+function nullableAtomicAmount(value: unknown): string | null {
+  const parsed = nullableString(value);
+  return parsed && /^(0|[1-9][0-9]*)$/.test(parsed) ? parsed : null;
+}
+
+function nullableNonce(value: unknown): string | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
   }
+  const parsed = nullableString(value);
+  return parsed && /^(0|[1-9][0-9]*)$/.test(parsed) ? parsed : null;
+}
+
+function extractGatewayTxHash(data: Record<string, unknown>): `0x${string}` | null {
+  // The top-level field is authoritative whenever it is valid.
+  if (isEvmTxHash(data["txHash"])) return data["txHash"];
+
+  // Compatibility with older Gateway response shapes. These never override a
+  // valid top-level txHash.
+  const transaction = data["transaction"];
+  if (isRecord(transaction) && isEvmTxHash(transaction["txHash"])) {
+    return transaction["txHash"];
+  }
+  if (isEvmTxHash(transaction)) return transaction;
   return null;
+}
+
+function parseGatewayTransfer(
+  value: unknown,
+  requestedId: string,
+): GatewayTransferStatus | null {
+  if (!isRecord(value)) return null;
+  const id = value["id"];
+  if (typeof id !== "string" || id !== requestedId) return null;
+  const status = value["status"];
+  if (typeof status !== "string" || !GATEWAY_STATUSES.has(status as GatewayTransferStatusValue)) {
+    return null;
+  }
+
+  return {
+    id,
+    status: status as GatewayTransferStatusValue,
+    token: nullableString(value["token"]),
+    sendingNetwork: nullableNetwork(value["sendingNetwork"]),
+    recipientNetwork: nullableNetwork(value["recipientNetwork"]),
+    fromAddress: nullableAddress(value["fromAddress"]),
+    toAddress: nullableAddress(value["toAddress"]),
+    amount: nullableAtomicAmount(value["amount"]),
+    nonce: nullableNonce(value["nonce"]),
+    txHash: extractGatewayTxHash(value),
+    createdAt: nullableString(value["createdAt"]),
+    updatedAt: nullableString(value["updatedAt"]),
+  };
 }
 
 async function fetchGatewayTransferStatus(
@@ -81,19 +169,7 @@ async function fetchGatewayTransferStatus(
       { signal: AbortSignal.timeout(10_000) },
     );
     if (!response.ok) return null;
-    const value: unknown = await response.json();
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-    const data = value as Record<string, unknown>;
-    return {
-      status: typeof data["status"] === "string" ? data["status"] : "unknown",
-      fromAddress: typeof data["fromAddress"] === "string" ? data["fromAddress"] : null,
-      toAddress: typeof data["toAddress"] === "string" ? data["toAddress"] : null,
-      amount: typeof data["amount"] === "string" ? data["amount"] : null,
-      token: typeof data["token"] === "string" ? data["token"] : null,
-      createdAt: typeof data["createdAt"] === "string" ? data["createdAt"] : null,
-      updatedAt: typeof data["updatedAt"] === "string" ? data["updatedAt"] : null,
-      transactionHash: extractGatewayTxHash(data),
-    };
+    return parseGatewayTransfer(await response.json(), settlementId);
   } catch {
     return null;
   }
@@ -116,21 +192,34 @@ function candidateForHash(
   };
 }
 
+function gatewayMetadata(transfer: GatewayTransferStatus): GatewayMetadata {
+  return {
+    transferId: transfer.id,
+    settlementId: transfer.id,
+    gatewayStatus: transfer.status,
+    status: transfer.status,
+    ...(transfer.sendingNetwork ? { sendingNetwork: transfer.sendingNetwork } : {}),
+    ...(transfer.recipientNetwork ? { recipientNetwork: transfer.recipientNetwork } : {}),
+    ...(transfer.fromAddress ? { fromAddress: transfer.fromAddress as `0x${string}` } : {}),
+    ...(transfer.toAddress ? { toAddress: transfer.toAddress as `0x${string}` } : {}),
+    ...(transfer.amount ? { amountAtomic: transfer.amount } : {}),
+    ...(transfer.nonce ? { nonce: transfer.nonce } : {}),
+  };
+}
+
 function makeEmptyProof(
   settlementId: string,
   verificationLevel: VerificationLevel,
-  gatewayStatus?: string,
+  gateway?: GatewayTransferStatus,
   gatewayWallet?: `0x${string}`,
 ): X402BatchProof {
   return {
     v: 1,
-    settlementId,
-    gatewayStatus,
-    status: gatewayStatus,
+    ...(gateway ? gatewayMetadata(gateway) : { settlementId }),
     verificationLevel,
     txHash: null,
     explorerUrl: null,
-    gatewayWallet,
+    ...(gatewayWallet ? { gatewayWallet } : {}),
     entriesCount: 0,
     netTransfersCount: 0,
     limitations: LIMITATIONS,
@@ -154,8 +243,6 @@ function chooseDecodedCandidate(
   if (expectedBuyer && expectedSeller) {
     const both = decoded.find((candidate) => candidate.buyerMatched && candidate.sellerMatched);
     if (both) return both;
-    const either = decoded.find((candidate) => candidate.buyerMatched || candidate.sellerMatched);
-    if (either) return either;
   } else if (expectedBuyer) {
     const buyer = decoded.find((candidate) => candidate.buyerMatched);
     if (buyer) return buyer;
@@ -178,30 +265,60 @@ function hasRequiredAddressParticipation(
   return false;
 }
 
+function unresolvedCandidateProof(
+  settlementId: string,
+  transfer: GatewayTransferStatus,
+  gatewayWallet: `0x${string}` | null,
+  selected: EvaluatedCandidate,
+  explorerBase: string,
+): X402BatchProof {
+  const official = selected.source === "gateway_txhash_field";
+  return {
+    ...makeEmptyProof(
+      settlementId,
+      official ? "official_batch_mapping" : selected.source === "legacy_timestamp_candidate"
+        ? "legacy_timestamp_candidate"
+        : "unresolved",
+      transfer,
+      gatewayWallet ?? undefined,
+    ),
+    txHash: selected.candidate.txHash,
+    explorerUrl: buildExplorerUrl(selected.candidate.txHash, explorerBase),
+    ...(official ? { officialBatchTxHash: selected.candidate.txHash } : {}),
+    matchedBy: official ? "gateway_txhash_field" : selected.source === "manual_tx"
+      ? "manual_tx"
+      : "legacy_timestamp_candidate",
+  };
+}
+
 /**
- * Resolve a Circle Gateway settlement UUID into portable batch evidence.
- * A timestamp candidate is never upgraded without strict RPC decoding.
+ * Resolve a Circle Gateway transfer UUID into portable unsigned batch evidence.
+ * A valid official Circle txHash is authoritative and is never replaced by an
+ * explorer timestamp candidate.
  */
 export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402BatchProof> {
   const {
     settlementId,
     gatewayApiUrl = DEFAULT_GATEWAY_API,
     arcExplorerApiUrl = DEFAULT_ARC_EXPLORER,
-    expectedBuyer,
-    expectedSeller,
+    expectedBuyer: rawExpectedBuyer,
+    expectedSeller: rawExpectedSeller,
     maxPages = 10,
     maxDistanceMs,
     manualTxHash,
+    allowLegacyTimestampFallback = false,
   } = opts;
   const gatewayWallet = opts.expectedGatewayWallet ?? opts.gatewayWalletAddress ?? DEFAULT_GATEWAY_WALLET;
   const gatewayWalletTyped = validGatewayWallet(gatewayWallet);
+  const expectedBuyer = isEvmAddress(rawExpectedBuyer) ? rawExpectedBuyer : undefined;
+  const expectedSeller = isEvmAddress(rawExpectedSeller) ? rawExpectedSeller : undefined;
 
   if (!isUuid(settlementId)) {
     return makeEmptyProof(settlementId, "unresolved", undefined, gatewayWalletTyped ?? undefined);
   }
 
-  const gatewayStatus = await fetchGatewayTransferStatus(gatewayApiUrl, settlementId);
-  if (!gatewayStatus) {
+  const gatewayTransfer = await fetchGatewayTransferStatus(gatewayApiUrl, settlementId);
+  if (!gatewayTransfer) {
     return makeEmptyProof(
       settlementId,
       "unresolved",
@@ -210,45 +327,41 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
     );
   }
 
-  const gatewayStatusText = gatewayStatus.status;
-  const normalizedStatus = gatewayStatusText.toLowerCase();
-  const baseProof = {
-    gatewayStatus: gatewayStatusText,
-    status: gatewayStatusText,
-    gatewayWallet: gatewayWalletTyped ?? undefined,
-  };
-
-  if (!ACTIVE_GATEWAY_STATUSES.has(normalizedStatus)) {
-    return {
-      ...makeEmptyProof(
-        settlementId,
-        "unresolved",
-        gatewayStatusText,
-        gatewayWalletTyped ?? undefined,
-      ),
-      ...baseProof,
-    };
+  // received and failed are terminal non-resolution states for this resolver.
+  // In particular, a received transfer is not eligible for timestamp guessing.
+  if (!LEGACY_FALLBACK_STATUSES.has(gatewayTransfer.status)) {
+    return makeEmptyProof(
+      settlementId,
+      "unresolved",
+      gatewayTransfer,
+      gatewayWalletTyped ?? undefined,
+    );
   }
 
-  const updatedAtMs = parseTimestamp(gatewayStatus.updatedAt);
+  const updatedAtMs = parseTimestamp(gatewayTransfer.updatedAt);
+  const officialTxHash = gatewayTransfer.txHash;
   const candidates: { candidate: SubmitBatchCandidate; source: CandidateSource }[] = [];
-  if (gatewayStatus.transactionHash) {
+
+  if (officialTxHash) {
     candidates.push({
-      candidate: candidateForHash(
-        gatewayStatus.transactionHash,
-        gatewayStatus.updatedAt,
-        updatedAtMs,
-      ),
+      candidate: candidateForHash(officialTxHash, gatewayTransfer.updatedAt, updatedAtMs),
       source: "gateway_txhash_field",
     });
-  }
-  if (manualTxHash && isEvmTxHash(manualTxHash)) {
+  } else if (manualTxHash && isEvmTxHash(manualTxHash)) {
     candidates.push({
-      candidate: candidateForHash(manualTxHash, gatewayStatus.updatedAt, updatedAtMs),
+      candidate: candidateForHash(manualTxHash, gatewayTransfer.updatedAt, updatedAtMs),
       source: "manual_tx",
     });
   }
-  if (gatewayWalletTyped && updatedAtMs !== null) {
+
+  // This is intentionally opt-in. A valid official hash takes the branch above
+  // and can never trigger discovery or be replaced by a discovered candidate.
+  if (
+    !officialTxHash &&
+    allowLegacyTimestampFallback &&
+    gatewayWalletTyped &&
+    updatedAtMs !== null
+  ) {
     try {
       const explorerCandidates = await findSubmitBatchCandidates(
         arcExplorerApiUrl,
@@ -260,42 +373,73 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
       const known = new Set(candidates.map(({ candidate }) => candidate.txHash.toLowerCase()));
       for (const candidate of explorerCandidates) {
         if (!known.has(candidate.txHash.toLowerCase())) {
-          candidates.push({ candidate, source: "timestamp_candidate" });
+          candidates.push({ candidate, source: "legacy_timestamp_candidate" });
         }
       }
     } catch {
-      // Candidate discovery is best-effort; a Gateway hash/manual hash can still be decoded.
+      // Legacy candidate discovery is best effort and never changes official data.
     }
   }
 
   if (!candidates.length) {
-    return {
-      ...makeEmptyProof(settlementId, "unresolved", gatewayStatusText, gatewayWalletTyped ?? undefined),
-      ...baseProof,
-    };
+    return makeEmptyProof(
+      settlementId,
+      "unresolved",
+      gatewayTransfer,
+      gatewayWalletTyped ?? undefined,
+    );
+  }
+
+  // A configured invalid Gateway wallet cannot produce strict decoded evidence.
+  // For an official mapping, preserve the official hash at its off-chain level.
+  if (!gatewayWalletTyped) {
+    return unresolvedCandidateProof(
+      settlementId,
+      gatewayTransfer,
+      gatewayWalletTyped,
+      {
+        candidate: candidates[0]!.candidate,
+        source: candidates[0]!.source,
+        decoded: null,
+        buyerMatched: false,
+        sellerMatched: false,
+      },
+      arcExplorerApiUrl,
+    );
   }
 
   let client: PublicClient;
   try {
     client = opts.rpcClient ?? createPublicClient({ transport: http(opts.rpcUrl ?? DEFAULT_ARC_RPC) });
   } catch {
-    return {
-      ...makeEmptyProof(settlementId, "timestamp_candidate", gatewayStatusText, gatewayWalletTyped ?? undefined),
-      ...baseProof,
-      txHash: candidates[0]!.candidate.txHash,
-      explorerUrl: buildExplorerUrl(candidates[0]!.candidate.txHash, arcExplorerApiUrl),
-      matchedBy: candidates[0]!.source,
-    };
+    return unresolvedCandidateProof(
+      settlementId,
+      gatewayTransfer,
+      gatewayWalletTyped,
+      {
+        candidate: candidates[0]!.candidate,
+        source: candidates[0]!.source,
+        decoded: null,
+        buyerMatched: false,
+        sellerMatched: false,
+      },
+      arcExplorerApiUrl,
+    );
   }
 
   const evaluated: EvaluatedCandidate[] = [];
   for (const { candidate, source } of candidates) {
-    const decoded = await decodeBatchTx(candidate.txHash, client, {
-      requireReceipt: true,
-      expectedGatewayWallet: gatewayWalletTyped ?? undefined,
-      expectedDomain: opts.expectedDomain ?? DEFAULT_DOMAIN,
-      expectedToken: opts.expectedToken,
-    });
+    let decoded: DecodedBatch | null = null;
+    try {
+      decoded = await decodeBatchTx(candidate.txHash, client, {
+        requireReceipt: true,
+        expectedGatewayWallet: gatewayWalletTyped,
+        expectedDomain: opts.expectedDomain ?? DEFAULT_DOMAIN,
+        expectedToken: opts.expectedToken,
+      });
+    } catch {
+      decoded = null;
+    }
     const buyerMatched = decoded && expectedBuyer
       ? buyerInBatch(decoded, expectedBuyer).found
       : false;
@@ -303,23 +447,22 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
       ? sellerInBatch(decoded, expectedSeller).found
       : false;
     evaluated.push({ candidate, source, decoded, buyerMatched, sellerMatched });
+
+    // Official Circle mapping has absolute priority: only this transaction is
+    // decoded, and failure remains official_batch_mapping.
+    if (source === "gateway_txhash_field") break;
   }
 
   const selectedDecoded = chooseDecodedCandidate(evaluated, expectedBuyer, expectedSeller);
   const selected = selectedDecoded ?? evaluated[0]!;
   if (!selected.decoded) {
-    return {
-      ...makeEmptyProof(
-        settlementId,
-        "timestamp_candidate",
-        gatewayStatusText,
-        gatewayWalletTyped ?? undefined,
-      ),
-      ...baseProof,
-      txHash: selected.candidate.txHash,
-      explorerUrl: buildExplorerUrl(selected.candidate.txHash, arcExplorerApiUrl),
-      matchedBy: selected.source,
-    };
+    return unresolvedCandidateProof(
+      settlementId,
+      gatewayTransfer,
+      gatewayWalletTyped,
+      selected,
+      arcExplorerApiUrl,
+    );
   }
 
   const decoded = selected.decoded;
@@ -332,25 +475,27 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
   const verificationLevel: VerificationLevel = addressParticipation
     ? "address_participation"
     : "decoded_batch";
-  const matchedBy: MatchedBy | undefined =
-    selected.source === "gateway_txhash_field"
-      ? "gateway_txhash_field"
-      : selected.source === "manual_tx"
-        ? "manual_tx"
-        : expectedBuyer || expectedSeller
-          ? "decoded_delta"
-          : undefined;
+  const matchedBy: MatchedBy = selected.source === "gateway_txhash_field"
+    ? "gateway_txhash_field"
+    : selected.source === "manual_tx"
+      ? "manual_tx"
+      : addressParticipation
+        ? "decoded_delta"
+        : "legacy_timestamp_candidate";
   const buyerCheck = expectedBuyer ? buyerInBatch(decoded, expectedBuyer) : undefined;
   const sellerCheck = expectedSeller ? sellerInBatch(decoded, expectedSeller) : undefined;
 
   return {
     v: 1,
-    settlementId,
-    ...baseProof,
+    ...gatewayMetadata(gatewayTransfer),
     verificationLevel,
     matchedBy,
     txHash: selected.candidate.txHash,
+    ...(selected.source === "gateway_txhash_field"
+      ? { officialBatchTxHash: selected.candidate.txHash }
+      : {}),
     explorerUrl: buildExplorerUrl(selected.candidate.txHash, arcExplorerApiUrl),
+    gatewayWallet: gatewayWalletTyped,
     batchId: decoded.batchId,
     domain: decoded.domain,
     token: decoded.token,

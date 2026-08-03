@@ -12,6 +12,7 @@ export type {
   DecodedBatchCalldata,
   DecodedSubmitBatchInput,
   GatewayTransferStatus,
+  GatewayTransferStatusValue,
   VerificationLevel,
   ProofStatus,
   MatchedBy,
