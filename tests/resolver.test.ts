@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeFunctionData, type PublicClient } from "viem";
+import { encodeBatchProof, decodeBatchProof } from "../src/proof-codec.js";
 import { SUBMIT_BATCH_ABI } from "../src/abi.js";
 import { resolveX402BatchProof } from "../src/resolver.js";
 
@@ -62,23 +63,28 @@ function rpcClient(options: {
   throwOnTransaction?: boolean;
   returnedHash?: string;
   blockNumber?: bigint | null;
+  blockTimestamp?: bigint;
+  blockTimestamps?: bigint[];
   calls?: { getTransaction: ReturnType<typeof vi.fn> };
 } = {}): PublicClient {
   const calls = options.calls ?? { getTransaction: vi.fn() };
-  calls.getTransaction.mockImplementation(async () => {
+  calls.getTransaction.mockImplementation(async ({ hash }: { hash?: string }) => {
     if (options.throwOnTransaction) throw new Error("rpc unavailable");
     return {
-      hash: (options.returnedHash ?? TX_HASH) as `0x${string}`,
+      hash: (options.returnedHash ?? hash ?? TX_HASH) as `0x${string}`,
       to: (options.to ?? WALLET) as `0x${string}`,
       from: "0x0000000000000000000000000000000000000099" as `0x${string}`,
       input: (options.fixture ?? buildFixture()).input,
       blockNumber: options.blockNumber === undefined ? 123n : options.blockNumber,
     };
   });
+  const blockTimestamps = [...(options.blockTimestamps ?? [])];
   return {
     getTransaction: calls.getTransaction,
     getTransactionReceipt: vi.fn(async () => ({ status: options.receiptStatus ?? "success" })),
-    getBlock: vi.fn(async () => ({ timestamp: 1_767_220_800n })),
+    getBlock: vi.fn(async () => ({
+      timestamp: blockTimestamps.shift() ?? options.blockTimestamp ?? 1_767_225_600n,
+    })),
   } as unknown as PublicClient;
 }
 
@@ -351,7 +357,7 @@ describe("legacy timestamp fallback", () => {
       rpcClient: rpcClient(),
     });
     expect(result.verificationLevel).toBe("decoded_batch");
-    expect(result.matchedBy).toBe("legacy_timestamp_candidate");
+    expect(result.matchedBy).toBeUndefined();
     expect(result.txHash).toBe(TX_HASH);
   });
 
@@ -471,5 +477,96 @@ describe("manual hash and safe metadata", () => {
     expect(result).not.toHaveProperty("entitySecret");
     expect(result).not.toHaveProperty("unknownObject");
     expect(JSON.stringify(result)).not.toContain("must-not-escape");
+  });
+});
+
+describe("resolver evidence integration and authoritative RPC timing", () => {
+  const before = 1_767_225_599n;
+  const exact = 1_767_225_600n;
+  const maximum = 1_767_229_200n;
+  const beyond = 1_767_229_201n;
+
+  async function resolveLegacy(client: PublicClient, hash = TX_HASH, extra: Record<string, unknown> = {}) {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(gatewayBody("completed")))
+      .mockResolvedValueOnce(jsonResponse(explorerBody(hash)));
+    return resolveX402BatchProof({
+      settlementId: SETTLEMENT_ID,
+      allowLegacyTimestampFallback: true,
+      rpcClient: client,
+      ...extra,
+    });
+  }
+
+  it("encodes and decodes resolver output with omitted buyer/seller fields", async () => {
+    const result = await resolveOfficial(gatewayBody("completed", { txHash: TX_HASH }), rpcClient());
+    const roundtrip = decodeBatchProof(encodeBatchProof(result));
+    expect(roundtrip).toMatchObject({ verificationLevel: "decoded_batch", txHash: TX_HASH });
+    expect(roundtrip).not.toHaveProperty("buyerVerified");
+    expect(roundtrip).not.toHaveProperty("sellerVerified");
+  });
+
+  it.each([
+    ["before updatedAt", before, "unresolved"],
+    ["exactly at updatedAt", exact, "decoded_batch"],
+    ["exactly at maximum", maximum, "decoded_batch"],
+    ["beyond maximum", beyond, "unresolved"],
+  ])("applies the RPC block-time window: %s", async (_label, timestamp, level) => {
+    const result = await resolveLegacy(rpcClient({ blockTimestamp: timestamp }));
+    expect(result.verificationLevel).toBe(level);
+    if (level === "unresolved") expect(result.txHash).toBeNull();
+    else expect(result.txHash).toBe(TX_HASH);
+  });
+
+  it("discards a stale first candidate and selects a later authoritative candidate", async () => {
+    const secondHash = OTHER_TX_HASH;
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(gatewayBody("completed")))
+      .mockResolvedValueOnce(jsonResponse({
+        items: [
+          { hash: TX_HASH, timestamp: CANDIDATE_TIME, method: "submitBatch" },
+          { hash: secondHash, timestamp: "2026-01-01T00:00:02.000Z", method: "submitBatch" },
+        ],
+        next_page_params: null,
+      }));
+    const result = await resolveX402BatchProof({
+      settlementId: SETTLEMENT_ID,
+      allowLegacyTimestampFallback: true,
+      rpcClient: rpcClient({ blockTimestamps: [before, exact] }),
+    });
+    expect(result.txHash).toBe(secondHash);
+    expect(result.verificationLevel).toBe("decoded_batch");
+  });
+
+  it("returns unresolved with no selected legacy transaction when all candidates are stale", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(gatewayBody("completed")))
+      .mockResolvedValueOnce(jsonResponse({
+        items: [
+          { hash: TX_HASH, timestamp: CANDIDATE_TIME, method: "submitBatch" },
+          { hash: OTHER_TX_HASH, timestamp: "2026-01-01T00:00:02.000Z", method: "submitBatch" },
+        ],
+        next_page_params: null,
+      }));
+    const result = await resolveX402BatchProof({
+      settlementId: SETTLEMENT_ID,
+      allowLegacyTimestampFallback: true,
+      rpcClient: rpcClient({ blockTimestamps: [before, beyond] }),
+    });
+    expect(result).toMatchObject({ verificationLevel: "unresolved", txHash: null });
+  });
+
+  it("does not apply legacy timing checks to official or manual hashes", async () => {
+    const official = await resolveOfficial(gatewayBody("completed", { txHash: TX_HASH }), rpcClient({ blockTimestamp: beyond }));
+    expect(official.verificationLevel).toBe("decoded_batch");
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(gatewayBody("completed")));
+    const manual = await resolveX402BatchProof({
+      settlementId: SETTLEMENT_ID,
+      manualTxHash: TX_HASH,
+      rpcClient: rpcClient({ blockTimestamp: before }),
+    });
+    expect(manual.verificationLevel).toBe("decoded_batch");
+    expect(manual.matchedBy).toBe("manual_tx");
   });
 });

@@ -14,7 +14,7 @@ const DEFAULT_ALLOWED_HOSTS = new Set([
 ]);
 
 const DEFAULT_EXPLORER_BASE = "https://testnet.arcscan.app";
-const DEFAULT_MAX_DISTANCE_MS = 60 * 60 * 1000;
+export const DEFAULT_MAX_DISTANCE_MS = 60 * 60 * 1000;
 
 export type SubmitBatchCandidate = {
   txHash: `0x${string}`;
@@ -54,11 +54,31 @@ export function safeExplorerUrl(
   }
 }
 
-function isStringRecord(value: unknown): value is Record<string, string> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** Normalize Blockscout's primitive cursor values for URLSearchParams. */
+function normalizePageCursor(value: unknown): Record<string, string> | null {
+  if (value === null || value === undefined) return null;
+  if (!isPlainRecord(value)) return null;
+
+  const normalized: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null || item === undefined) continue;
+    if (typeof item === "string") {
+      normalized[key] = item;
+    } else if (typeof item === "number" && Number.isFinite(item)) {
+      normalized[key] = String(item);
+    } else if (typeof item === "boolean") {
+      normalized[key] = String(item);
+    } else {
+      return null;
+    }
   }
-  return Object.values(value).every((item) => typeof item === "string");
+  return normalized;
 }
 
 function parseTimestamp(value: unknown): number | null {
@@ -120,16 +140,11 @@ export async function findSubmitBatchCandidates(
     } catch {
       break;
     }
-    if (typeof data !== "object" || data === null || Array.isArray(data)) break;
+    if (!isPlainRecord(data) || !Array.isArray(data["items"])) break;
 
-    const record = data as Record<string, unknown>;
-    if (!Array.isArray(record["items"])) break;
-    const pageParams = record["next_page_params"];
-    if (pageParams !== null && pageParams !== undefined && !isStringRecord(pageParams)) {
-      break;
-    }
-
-    for (const item of record["items"]) {
+    // Process the current page before validating its cursor. A malformed next
+    // cursor must not discard candidates already found on this page.
+    for (const item of data["items"]) {
       if (!isTransactionItem(item)) continue;
       if (item.method !== "submitBatch" || !isEvmTxHash(item.hash)) continue;
       const timestampMs = parseTimestamp(item.timestamp);
@@ -145,8 +160,11 @@ export async function findSubmitBatchCandidates(
       candidates.set(candidate.txHash.toLowerCase(), candidate);
     }
 
-    nextPage = pageParams ?? null;
-    if (!nextPage) break;
+    const rawPageParams = data["next_page_params"];
+    if (rawPageParams === null || rawPageParams === undefined) break;
+    const normalizedPageParams = normalizePageCursor(rawPageParams);
+    if (!normalizedPageParams || Object.keys(normalizedPageParams).length === 0) break;
+    nextPage = normalizedPageParams;
   }
 
   return [...candidates.values()].sort(

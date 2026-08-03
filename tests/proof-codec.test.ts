@@ -113,6 +113,7 @@ describe("portable canonical Gateway metadata", () => {
       amountAtomic: "1000000",
       nonce: NONCE,
       officialBatchTxHash: VALID_PROOF.txHash!,
+      matchedBy: "gateway_txhash_field",
     };
     const decoded = decodeBatchProof(encodeBatchProof(proof));
     expect(decoded?.gatewayStatus).toBe("completed");
@@ -160,6 +161,41 @@ describe("portable canonical Gateway metadata", () => {
       gatewayStatus: "confirmed",
       status: "completed",
     })).toThrow();
+  });
+
+  it("accepts and rejects complete evidence combinations for every verification level", () => {
+    const hash = ("0x" + "a".repeat(64)) as `0x${string}`;
+    const base = {
+      v: 1 as const,
+      txHash: hash,
+      explorerUrl: "https://testnet.arcscan.app/tx/" + hash,
+      batchId: ("0x" + "b".repeat(64)) as `0x${string}`,
+      domain: 26,
+      token: ("0x" + "c".repeat(40)) as `0x${string}`,
+      gatewayWallet: ("0x" + "d".repeat(40)) as `0x${string}`,
+      entriesCount: 2,
+      netTransfersCount: 1,
+    };
+    const valid = [
+      { v: 1 as const, verificationLevel: "unresolved" as const, txHash: null, explorerUrl: null, entriesCount: 0, netTransfersCount: 0 },
+      { verificationLevel: "official_batch_mapping" as const, v: 1 as const, txHash: hash, explorerUrl: base.explorerUrl, entriesCount: 0, netTransfersCount: 0, matchedBy: "gateway_txhash_field" as const, officialBatchTxHash: hash },
+      { v: 1 as const, verificationLevel: "legacy_timestamp_candidate" as const, txHash: hash, explorerUrl: base.explorerUrl, entriesCount: 0, netTransfersCount: 0, matchedBy: "legacy_timestamp_candidate" as const },
+      { verificationLevel: "decoded_batch" as const, ...base },
+      { ...VALID_PROOF },
+    ];
+    for (const proof of valid) expect(decodeBatchProof(encodeBatchProof(proof as X402BatchProof))).not.toBeNull();
+
+    const invalid = [
+      { ...valid[0], batchId: base.batchId },
+      { ...valid[1], officialBatchTxHash: undefined },
+      { ...valid[2], txHash: null },
+      { ...valid[3], token: undefined },
+      { ...valid[3], matchedBy: "legacy_timestamp_candidate" },
+      { ...VALID_PROOF, buyerVerified: false },
+      { ...VALID_PROOF, buyerVerified: true, buyerEntry: undefined },
+      { ...VALID_PROOF, matchedBy: "decoded_delta", officialBatchTxHash: hash },
+    ];
+    for (const proof of invalid) expect(() => encodeBatchProof(proof as X402BatchProof)).toThrow();
   });
 });
 
@@ -231,5 +267,124 @@ describe("unsafe field rejection (recursive)", () => {
     expect(() => encodeBatchProof(bad as X402BatchProof)).toThrow(
       "unsafe field",
     );
+  });
+});
+
+describe("JSON normalization and legacy v1 migration", () => {
+  const legacyBase = {
+    v: 1,
+    settlementId: "550e8400-e29b-41d4-a716-446655440000",
+    status: "completed",
+    txHash: "0x" + "a".repeat(64),
+    explorerUrl: "https://testnet.arcscan.app/tx/0x" + "a".repeat(64),
+    entriesCount: 0,
+    netTransfersCount: 0,
+  };
+  const legacyFixture = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const decodedContext = {
+    batchId: "0x" + "b".repeat(64),
+    domain: 26,
+    token: "0x" + "c".repeat(40),
+    gatewayWallet: "0x" + "d".repeat(40),
+    entriesCount: 2,
+    netTransfersCount: 1,
+  };
+
+  it("encodes resolver-style optional undefined fields after JSON normalization", () => {
+    const proof = {
+      ...VALID_PROOF,
+      verificationLevel: "decoded_batch",
+      buyerVerified: undefined,
+      sellerVerified: undefined,
+      buyerEntry: undefined,
+      sellerEntry: undefined,
+      matchedBy: undefined,
+    } as unknown as X402BatchProof;
+    const decoded = decodeBatchProof(encodeBatchProof(proof));
+    expect(decoded).not.toBeNull();
+    expect(decoded).not.toHaveProperty("buyerVerified");
+    expect(decoded).not.toHaveProperty("matchedBy");
+  });
+
+  it("rejects unsafe keys even when their values are undefined", () => {
+    expect(() => encodeBatchProof({ ...VALID_PROOF, authorization: undefined } as unknown as X402BatchProof)).toThrow("unsafe field");
+  });
+
+  it("rejects undefined array elements instead of accepting JSON null coercion", () => {
+    expect(() => encodeBatchProof({ ...VALID_PROOF, limitations: [undefined] } as unknown as X402BatchProof)).toThrow();
+  });
+
+  it.each([
+    ["cyclic objects", (() => { const value: Record<string, unknown> = { ...VALID_PROOF }; value.self = value; return value; })()],
+    ["BigInt values", { ...VALID_PROOF, extra: 1n }],
+    ["unsupported objects", { ...VALID_PROOF, extra: new Date() }],
+  ])("fails safely for %s", (_label, value) => {
+    expect(() => encodeBatchProof(value as X402BatchProof)).toThrow();
+  });
+
+  it("roundtrips a resolver result with no expected buyer or seller", () => {
+    const proof = {
+      ...VALID_PROOF,
+      verificationLevel: "decoded_batch",
+      matchedBy: undefined,
+      buyerVerified: undefined,
+      sellerVerified: undefined,
+      buyerEntry: undefined,
+      sellerEntry: undefined,
+    } as unknown as X402BatchProof;
+    expect(decodeBatchProof(encodeBatchProof(proof))).toMatchObject({ verificationLevel: "decoded_batch" });
+  });
+
+  it("migrates the legacy unresolved fixture", () => {
+    const encoded = legacyFixture({ ...legacyBase, status: "unresolved", txHash: null, explorerUrl: null });
+    expect(decodeBatchProof(encoded)).toMatchObject({ v: 1, verificationLevel: "unresolved", txHash: null });
+  });
+
+  it("migrates a legacy timestamp candidate", () => {
+    const encoded = legacyFixture({ ...legacyBase, matchedBy: "timestamp_candidate" });
+    expect(decodeBatchProof(encoded)).toMatchObject({ verificationLevel: "legacy_timestamp_candidate", matchedBy: "legacy_timestamp_candidate" });
+  });
+
+  it("migrates a legacy Gateway hash conservatively", () => {
+    const encoded = legacyFixture({ ...legacyBase, matchedBy: "gateway_txhash_field" });
+    expect(decodeBatchProof(encoded)).toMatchObject({ verificationLevel: "official_batch_mapping", officialBatchTxHash: legacyBase.txHash });
+  });
+
+  it("migrates a complete legacy decoded batch", () => {
+    const encoded = legacyFixture({ ...legacyBase, ...decodedContext, matchedBy: "gateway_txhash_field" });
+    expect(decodeBatchProof(encoded)).toMatchObject({ verificationLevel: "decoded_batch", batchId: decodedContext.batchId });
+  });
+
+  it("preserves safe legacy address participation", () => {
+    const encoded = legacyFixture({
+      ...legacyBase,
+      ...decodedContext,
+      matchedBy: "decoded_delta",
+      buyerVerified: true,
+      buyerEntry: { address: "0x" + "1".repeat(40), usdc: "-1.000000" },
+    });
+    expect(decodeBatchProof(encoded)).toMatchObject({ verificationLevel: "address_participation", buyerVerified: true });
+  });
+
+  it("downgrades contradictory legacy participation to decoded_batch", () => {
+    const encoded = legacyFixture({
+      ...legacyBase,
+      ...decodedContext,
+      matchedBy: "decoded_delta",
+      buyerVerified: true,
+      buyerEntry: { address: "0x" + "1".repeat(40), usdc: "-1.000000" },
+      sellerVerified: false,
+    });
+    expect(decodeBatchProof(encoded)).toMatchObject({ verificationLevel: "decoded_batch" });
+    expect(decodeBatchProof(encoded)).not.toHaveProperty("sellerVerified");
+  });
+
+  it.each([
+    ["invalid hash", { ...legacyBase, txHash: "0x123" }],
+    ["unsupported key", { ...legacyBase, unsupported: true }],
+    ["unsafe field", { ...legacyBase, authorization: "secret" }],
+  ])("rejects legacy %s", (_label, value) => {
+    expect(decodeBatchProof(legacyFixture(value))).toBeNull();
   });
 });

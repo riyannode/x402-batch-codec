@@ -12,6 +12,7 @@ import {
   buildArcExplorerTxUrl,
   findSubmitBatchCandidates,
   safeExplorerUrl,
+  DEFAULT_MAX_DISTANCE_MS,
   type SubmitBatchCandidate,
 } from "./explorer.js";
 import { decodeBatchTx } from "./decode-batch-tx.js";
@@ -31,6 +32,7 @@ const DEFAULT_ARC_EXPLORER = "https://testnet.arcscan.app";
 const DEFAULT_ARC_RPC = "https://rpc.testnet.arc.network";
 const DEFAULT_GATEWAY_WALLET = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9";
 const DEFAULT_DOMAIN = 26;
+const MAX_RPC_CANDIDATE_EVALUATIONS = 64;
 const GATEWAY_STATUSES = new Set<GatewayTransferStatusValue>([
   "received",
   "batched",
@@ -245,7 +247,6 @@ function makeEmptyProof(
     verificationLevel,
     txHash: null,
     explorerUrl: null,
-    ...(gatewayWallet ? { gatewayWallet } : {}),
     entriesCount: 0,
     netTransfersCount: 0,
     limitations: LIMITATIONS,
@@ -365,6 +366,7 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
   }
 
   const updatedAtMs = parseTimestamp(gatewayTransfer.updatedAt);
+  const effectiveMaxDistanceMs = maxDistanceMs ?? DEFAULT_MAX_DISTANCE_MS;
   const officialTxHash = gatewayTransfer.txHash;
   const candidates: { candidate: SubmitBatchCandidate; source: CandidateSource }[] = [];
 
@@ -394,7 +396,7 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
         gatewayWalletTyped,
         updatedAtMs,
         maxPages,
-        maxDistanceMs,
+        effectiveMaxDistanceMs,
       );
       const known = new Set(candidates.map(({ candidate }) => candidate.txHash.toLowerCase()));
       for (const candidate of explorerCandidates) {
@@ -408,12 +410,7 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
   }
 
   if (!candidates.length) {
-    return makeEmptyProof(
-      settlementId,
-      "unresolved",
-      gatewayTransfer,
-      gatewayWalletTyped ?? undefined,
-    );
+    return makeEmptyProof(settlementId, "unresolved", gatewayTransfer, gatewayWalletTyped ?? undefined);
   }
 
   // A configured invalid Gateway wallet cannot produce strict decoded evidence.
@@ -453,8 +450,10 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
     );
   }
 
-  const evaluated: EvaluatedCandidate[] = [];
-  for (const { candidate, source } of candidates) {
+  let firstDecoded: EvaluatedCandidate | undefined;
+  let firstFailedLegacy: EvaluatedCandidate | undefined;
+  let firstFailedDirect: EvaluatedCandidate | undefined;
+  for (const { candidate, source } of candidates.slice(0, MAX_RPC_CANDIDATE_EVALUATIONS)) {
     let decoded: DecodedBatch | null = null;
     try {
       decoded = await decodeBatchTx(candidate.txHash, client, {
@@ -466,21 +465,57 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
     } catch {
       decoded = null;
     }
+
+    // Explorer timestamps are only a discovery hint. Recheck the authoritative
+    // RPC block timestamp before retaining an explorer candidate.
+    if (source === "legacy_timestamp_candidate" && decoded) {
+      const blockTimestampMs = decoded.blockTimestamp * 1000;
+      if (
+        updatedAtMs === null ||
+        blockTimestampMs < updatedAtMs ||
+        blockTimestampMs - updatedAtMs > effectiveMaxDistanceMs
+      ) {
+        continue;
+      }
+    }
+
     const buyerMatched = decoded && expectedBuyer
       ? buyerInBatch(decoded, expectedBuyer).found
       : false;
     const sellerMatched = decoded && expectedSeller
       ? sellerInBatch(decoded, expectedSeller).found
       : false;
-    evaluated.push({ candidate, source, decoded, buyerMatched, sellerMatched });
+    const evaluated: EvaluatedCandidate = { candidate, source, decoded, buyerMatched, sellerMatched };
 
     // Official Circle mapping has absolute priority: only this transaction is
     // decoded, and failure remains official_batch_mapping.
-    if (source === "gateway_txhash_field") break;
+    if (source === "gateway_txhash_field") {
+      firstDecoded = evaluated;
+      break;
+    }
+    if (!decoded && source !== "legacy_timestamp_candidate" && !firstFailedDirect) {
+      firstFailedDirect = evaluated;
+    }
+    if (!decoded && source === "legacy_timestamp_candidate" && !firstFailedLegacy) {
+      firstFailedLegacy = evaluated;
+    }
+    if (decoded && !firstDecoded) firstDecoded = evaluated;
+    if (decoded && !expectedBuyer && !expectedSeller) break;
+    if (
+      decoded &&
+      hasRequiredAddressParticipation(buyerMatched, sellerMatched, expectedBuyer, expectedSeller)
+    ) {
+      firstDecoded = evaluated;
+      break;
+    }
   }
 
-  const selectedDecoded = chooseDecodedCandidate(evaluated, expectedBuyer, expectedSeller);
-  const selected = selectedDecoded ?? evaluated[0]!;
+  const selected = firstDecoded ?? firstFailedDirect ?? firstFailedLegacy;
+  if (!selected) {
+    // In particular, do not return a stale explorer hash after authoritative RPC
+    // timing rejected every legacy candidate.
+    return makeEmptyProof(settlementId, "unresolved", gatewayTransfer, gatewayWalletTyped ?? undefined);
+  }
   if (!selected.decoded) {
     return unresolvedCandidateProof(
       settlementId,
@@ -501,13 +536,13 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
   const verificationLevel: VerificationLevel = addressParticipation
     ? "address_participation"
     : "decoded_batch";
-  const matchedBy: MatchedBy = selected.source === "gateway_txhash_field"
+  const matchedBy: MatchedBy | undefined = selected.source === "gateway_txhash_field"
     ? "gateway_txhash_field"
     : selected.source === "manual_tx"
       ? "manual_tx"
       : addressParticipation
         ? "decoded_delta"
-        : "legacy_timestamp_candidate";
+        : undefined;
   const buyerCheck = expectedBuyer ? buyerInBatch(decoded, expectedBuyer) : undefined;
   const sellerCheck = expectedSeller ? sellerInBatch(decoded, expectedSeller) : undefined;
 
@@ -515,7 +550,7 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
     v: 1,
     ...gatewayMetadata(gatewayTransfer),
     verificationLevel,
-    matchedBy,
+    ...(matchedBy ? { matchedBy } : {}),
     txHash: selected.candidate.txHash,
     ...(selected.source === "gateway_txhash_field"
       ? { officialBatchTxHash: selected.candidate.txHash }
@@ -527,14 +562,14 @@ export async function resolveX402BatchProof(opts: ResolveOptions): Promise<X402B
     token: decoded.token,
     entriesCount: decoded.entries.length,
     netTransfersCount: decoded.netTransfers.length,
-    buyerVerified: expectedBuyer ? buyerCheck!.found : undefined,
-    sellerVerified: expectedSeller ? sellerCheck!.found : undefined,
-    buyerEntry: buyerCheck?.entry
-      ? { address: buyerCheck.entry.address, usdc: buyerCheck.entry.usdc }
-      : undefined,
-    sellerEntry: sellerCheck?.entry
-      ? { address: sellerCheck.entry.address, usdc: sellerCheck.entry.usdc }
-      : undefined,
+    ...(expectedBuyer ? { buyerVerified: buyerCheck!.found } : {}),
+    ...(expectedSeller ? { sellerVerified: sellerCheck!.found } : {}),
+    ...(buyerCheck?.entry
+      ? { buyerEntry: { address: buyerCheck.entry.address, usdc: buyerCheck.entry.usdc } }
+      : {}),
+    ...(sellerCheck?.entry
+      ? { sellerEntry: { address: sellerCheck.entry.address, usdc: sellerCheck.entry.usdc } }
+      : {}),
     limitations: LIMITATIONS,
   };
 }
