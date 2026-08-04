@@ -62,6 +62,24 @@ describe("decodeSubmitBatchCalldataBytes", () => {
     expect(result!.entries[1]!.usdc).toBe("1.000000");
   });
 
+  it("accepts the exact 0xa0 dynamic offset", () => {
+    expect(decodeSubmitBatchCalldataBytes(buildFixture())).not.toBeNull();
+  });
+
+  it.each([
+    ["0x80", "80".padStart(64, "0")],
+    ["0xc0", "c0".padStart(64, "0")],
+    ["unaligned", "a1".padStart(64, "0")],
+    ["excessively large", "1".padStart(64, "0") + "0".repeat(63)],
+    ["malformed", "z".repeat(64)],
+  ])("rejects %s dynamic offset", (_label, offsetWord) => {
+    const words = buildFixture().slice(2).match(/.{64}/g)!;
+    words[0] = offsetWord!;
+    expect(
+      decodeSubmitBatchCalldataBytes(`0x${words.join("")}` as `0x${string}`),
+    ).toBeNull();
+  });
+
   it("returns null for too-short input", () => {
     expect(decodeSubmitBatchCalldataBytes("0x1234")).toBeNull();
   });
@@ -75,6 +93,35 @@ describe("decodeSubmitBatchCalldataBytes", () => {
       decodeSubmitBatchCalldataBytes(
         ("0x" + "zz".repeat(300)) as `0x${string}`,
       ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["missing prefix", "aa"],
+    ["odd-length hex", "0x" + "a".repeat(511)],
+    ["bad dynamic offset", "0x" + "00".repeat(32 * 6)],
+  ])("rejects %s", (_label, value) => {
+    expect(decodeSubmitBatchCalldataBytes(value as `0x${string}`)).toBeNull();
+  });
+
+  it("rejects an out-of-range domain", () => {
+    const valid = buildFixture();
+    const words = valid.slice(2).match(/.{64}/g)!;
+    words[2] = "100000000".padStart(64, "0");
+    expect(decodeSubmitBatchCalldataBytes(`0x${words.join("")}` as `0x${string}`)).toBeNull();
+  });
+
+  it("rejects a non-zero-padded address word", () => {
+    const valid = buildFixture();
+    const words = valid.slice(2).match(/.{64}/g)!;
+    words[6] = "1".repeat(24) + words[6]!.slice(24);
+    expect(decodeSubmitBatchCalldataBytes(`0x${words.join("")}` as `0x${string}`)).toBeNull();
+  });
+
+  it("enforces the configured entry limit", () => {
+    const valid = buildFixture();
+    expect(
+      decodeSubmitBatchCalldataBytes(valid, { maxEntries: 1 }),
     ).toBeNull();
   });
 });
