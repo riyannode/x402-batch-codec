@@ -341,6 +341,59 @@ describe("JSON normalization and legacy v1 migration", () => {
     expect(decodeBatchProof(encoded)).toMatchObject({ v: 1, verificationLevel: "unresolved", txHash: null });
   });
 
+  it("migrates the exact legacy decoded timestamp proof as decoded batch evidence", () => {
+    const oldDecodedTimestampProof = {
+      v: 1,
+      settlementId: legacyBase.settlementId,
+      status: "completed",
+      txHash: legacyBase.txHash,
+      explorerUrl: legacyBase.explorerUrl,
+      batchId: decodedContext.batchId,
+      domain: 26,
+      token: decodedContext.token,
+      gatewayWallet: decodedContext.gatewayWallet,
+      entriesCount: 2,
+      netTransfersCount: 1,
+      matchedBy: "timestamp_candidate",
+    };
+    const decoded = decodeBatchProof(legacyFixture(oldDecodedTimestampProof));
+
+    expect(decoded).toMatchObject({
+      verificationLevel: "decoded_batch",
+      txHash: legacyBase.txHash,
+      batchId: decodedContext.batchId,
+      domain: 26,
+      token: decodedContext.token,
+      gatewayWallet: decodedContext.gatewayWallet,
+      entriesCount: 2,
+      netTransfersCount: 1,
+    });
+    expect(decoded).not.toHaveProperty("matchedBy");
+  });
+
+  it("preserves a false legacy buyer verification without contradictory entry data", () => {
+    const encoded = legacyFixture({
+      ...legacyBase,
+      ...decodedContext,
+      matchedBy: "timestamp_candidate",
+      buyerVerified: false,
+    });
+    const decoded = decodeBatchProof(encoded);
+
+    expect(decoded).toMatchObject({ verificationLevel: "decoded_batch", buyerVerified: false });
+    expect(decoded).not.toHaveProperty("buyerEntry");
+  });
+
+  it("rejects a timestamp candidate with nonzero counts but incomplete decoded context", () => {
+    const encoded = legacyFixture({
+      ...legacyBase,
+      entriesCount: 2,
+      netTransfersCount: 1,
+      matchedBy: "timestamp_candidate",
+    });
+    expect(decodeBatchProof(encoded)).toBeNull();
+  });
+
   it("migrates a legacy timestamp candidate", () => {
     const encoded = legacyFixture({ ...legacyBase, matchedBy: "timestamp_candidate" });
     expect(decodeBatchProof(encoded)).toMatchObject({ verificationLevel: "legacy_timestamp_candidate", matchedBy: "legacy_timestamp_candidate" });

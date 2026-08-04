@@ -338,6 +338,24 @@ function validateLegacyProof(value: unknown): value is PlainRecord {
   return true;
 }
 
+function preserveConsistentLegacyParticipation(base: PlainRecord, legacy: PlainRecord): void {
+  for (const role of ["buyer", "seller"] as const) {
+    const verifiedKey = `${role}Verified`;
+    const entryKey = `${role}Entry`;
+    const verified = legacy[verifiedKey];
+
+    if (verified === true) {
+      base[verifiedKey] = true;
+      // validateLegacyProof already requires the entry for a true flag.
+      base[entryKey] = legacy[entryKey];
+    } else if (verified === false) {
+      base[verifiedKey] = false;
+      // An entry without a matching positive verification flag is
+      // contradictory evidence, so it is deliberately not migrated.
+    }
+  }
+}
+
 function migrateLegacyProof(legacy: PlainRecord): X402BatchProof | null {
   if (!validateLegacyProof(legacy)) return null;
   const txHash = legacy["txHash"] as `0x${string}` | null;
@@ -369,8 +387,26 @@ function migrateLegacyProof(legacy: PlainRecord): X402BatchProof | null {
     base["verificationLevel"] = "unresolved";
     base["explorerUrl"] = null;
   } else if (oldMatchedBy === "timestamp_candidate") {
-    base["verificationLevel"] = "legacy_timestamp_candidate";
-    base["matchedBy"] = "legacy_timestamp_candidate";
+    if (complete) {
+      Object.assign(base, {
+        batchId: legacy["batchId"],
+        domain: legacy["domain"],
+        token: legacy["token"],
+        gatewayWallet: legacy["gatewayWallet"],
+        verificationLevel: "decoded_batch",
+      });
+      preserveConsistentLegacyParticipation(base, legacy);
+    } else if (
+      legacy["entriesCount"] === 0 &&
+      legacy["netTransfersCount"] === 0 &&
+      !hasAnyDecodedBatchField(legacy)
+    ) {
+      base["verificationLevel"] = "legacy_timestamp_candidate";
+      base["matchedBy"] = "legacy_timestamp_candidate";
+    } else {
+      // Do not turn contradictory legacy metadata into a timestamp-only proof.
+      return null;
+    }
   } else if (oldMatchedBy === "gateway_txhash_field") {
     if (complete) {
       Object.assign(base, {
@@ -441,7 +477,7 @@ function migrateLegacyProof(legacy: PlainRecord): X402BatchProof | null {
     base["explorerUrl"] = null;
   }
 
-  if (base["verificationLevel"] === "decoded_batch" && oldMatchedBy !== "decoded_delta") {
+  if (base["verificationLevel"] === "decoded_batch" && oldMatchedBy !== "decoded_delta" && oldMatchedBy !== "timestamp_candidate") {
     for (const key of ["buyerVerified", "sellerVerified", "buyerEntry", "sellerEntry"]) {
       if (legacy[key] !== undefined) base[key] = legacy[key];
     }
